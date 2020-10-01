@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <linux/sched.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -40,7 +41,6 @@
 #include <binder/TextOutput.h>
 
 #include <cutils/ashmem.h>
-#include <utils/Debug.h>
 #include <utils/Flattenable.h>
 #include <utils/Log.h>
 #include <utils/misc.h>
@@ -188,16 +188,18 @@ status_t Parcel::finishUnflattenBinder(
     return OK;
 }
 
+static constexpr inline int schedPolicyMask(int policy, int priority) {
+    return (priority & FLAT_BINDER_FLAG_PRIORITY_MASK) | ((policy & 3) << FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT);
+}
+
 status_t Parcel::flattenBinder(const sp<IBinder>& binder)
 {
     flat_binder_object obj;
+    obj.flags = FLAT_BINDER_FLAG_ACCEPTS_FDS;
 
-    if (IPCThreadState::self()->backgroundSchedulingDisabled()) {
-        /* minimum priority for all nodes is nice 0 */
-        obj.flags = FLAT_BINDER_FLAG_ACCEPTS_FDS;
-    } else {
-        /* minimum priority for all nodes is MAX_NICE(19) */
-        obj.flags = 0x13 | FLAT_BINDER_FLAG_ACCEPTS_FDS;
+    int schedBits = 0;
+    if (!IPCThreadState::self()->backgroundSchedulingDisabled()) {
+        schedBits = schedPolicyMask(SCHED_NORMAL, 19);
     }
 
     if (binder != nullptr) {
@@ -213,6 +215,13 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
             obj.handle = handle;
             obj.cookie = 0;
         } else {
+            int policy = local->getMinSchedulerPolicy();
+            int priority = local->getMinSchedulerPriority();
+
+            if (policy != 0 || priority != 0) {
+                // override value, since it is set explicitly
+                schedBits = schedPolicyMask(policy, priority);
+            }
             if (local->isRequestingSid()) {
                 obj.flags |= FLAT_BINDER_FLAG_TXN_SECURITY_CTX;
             }
@@ -225,6 +234,8 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
         obj.binder = 0;
         obj.cookie = 0;
     }
+
+    obj.flags |= schedBits;
 
     return finishFlattenBinder(binder, obj);
 }
@@ -1052,12 +1063,22 @@ status_t Parcel::writeCString(const char* str)
 
 status_t Parcel::writeString8(const String8& str)
 {
-    status_t err = writeInt32(str.bytes());
-    // only write string if its length is more than zero characters,
-    // as readString8 will only read if the length field is non-zero.
-    // this is slightly different from how writeString16 works.
-    if (str.bytes() > 0 && err == NO_ERROR) {
-        err = write(str.string(), str.bytes()+1);
+    return writeString8(str.string(), str.size());
+}
+
+status_t Parcel::writeString8(const char* str, size_t len)
+{
+    if (str == nullptr) return writeInt32(-1);
+
+    status_t err = writeInt32(len);
+    if (err == NO_ERROR) {
+        uint8_t* data = (uint8_t*)writeInplace(len+sizeof(char));
+        if (data) {
+            memcpy(data, str, len);
+            *reinterpret_cast<char*>(data+len) = 0;
+            return NO_ERROR;
+        }
+        err = mError;
     }
     return err;
 }
@@ -1504,7 +1525,7 @@ const void* Parcel::readInplace(size_t len) const
 
 template<class T>
 status_t Parcel::readAligned(T *pArg) const {
-    COMPILE_TIME_ASSERT_FUNCTION_SCOPE(PAD_SIZE_UNSAFE(sizeof(T)) == sizeof(T));
+    static_assert(PAD_SIZE_UNSAFE(sizeof(T)) == sizeof(T));
 
     if ((mDataPos+sizeof(T)) <= mDataSize) {
         if (mObjectsSize > 0) {
@@ -1537,7 +1558,7 @@ T Parcel::readAligned() const {
 
 template<class T>
 status_t Parcel::writeAligned(T val) {
-    COMPILE_TIME_ASSERT_FUNCTION_SCOPE(PAD_SIZE_UNSAFE(sizeof(T)) == sizeof(T));
+    static_assert(PAD_SIZE_UNSAFE(sizeof(T)) == sizeof(T));
 
     if ((mDataPos+sizeof(val)) <= mDataCapacity) {
 restart_write:
@@ -2012,37 +2033,39 @@ const char* Parcel::readCString() const
 
 String8 Parcel::readString8() const
 {
-    String8 retString;
-    status_t status = readString8(&retString);
-    if (status != OK) {
-        // We don't care about errors here, so just return an empty string.
-        return String8();
-    }
-    return retString;
+    size_t len;
+    const char* str = readString8Inplace(&len);
+    if (str) return String8(str, len);
+    ALOGE("Reading a NULL string not supported here.");
+    return String8();
 }
 
 status_t Parcel::readString8(String8* pArg) const
 {
-    int32_t size;
-    status_t status = readInt32(&size);
-    if (status != OK) {
-        return status;
-    }
-    // watch for potential int overflow from size+1
-    if (size < 0 || size >= INT32_MAX) {
-        return BAD_VALUE;
-    }
-    // |writeString8| writes nothing for empty string.
-    if (size == 0) {
+    size_t len;
+    const char* str = readString8Inplace(&len);
+    if (str) {
+        pArg->setTo(str, len);
+        return 0;
+    } else {
         *pArg = String8();
-        return OK;
+        return UNEXPECTED_NULL;
     }
-    const char* str = (const char*)readInplace(size + 1);
-    if (str == nullptr) {
-        return BAD_VALUE;
+}
+
+const char* Parcel::readString8Inplace(size_t* outLen) const
+{
+    int32_t size = readInt32();
+    // watch for potential int overflow from size+1
+    if (size >= 0 && size < INT32_MAX) {
+        *outLen = size;
+        const char* str = (const char*)readInplace(size+1);
+        if (str != nullptr) {
+            return str;
+        }
     }
-    pArg->setTo(str, size);
-    return OK;
+    *outLen = 0;
+    return nullptr;
 }
 
 String16 Parcel::readString16() const
@@ -2501,6 +2524,22 @@ void Parcel::ipcSetDataReference(const uint8_t* data, size_t dataSize,
         if (offset < minOffset) {
             ALOGE("%s: bad object offset %" PRIu64 " < %" PRIu64 "\n",
                   __func__, (uint64_t)offset, (uint64_t)minOffset);
+            mObjectsSize = 0;
+            break;
+        }
+        const flat_binder_object* flat
+            = reinterpret_cast<const flat_binder_object*>(mData + offset);
+        uint32_t type = flat->hdr.type;
+        if (!(type == BINDER_TYPE_BINDER || type == BINDER_TYPE_HANDLE ||
+              type == BINDER_TYPE_FD)) {
+            // We should never receive other types (eg BINDER_TYPE_FDA) as long as we don't support
+            // them in libbinder. If we do receive them, it probably means a kernel bug; try to
+            // recover gracefully by clearing out the objects, and releasing the objects we do
+            // know about.
+            android_errorWriteLog(0x534e4554, "135930648");
+            ALOGE("%s: unsupported type object (%" PRIu32 ") at offset %" PRIu64 "\n",
+                  __func__, type, (uint64_t)offset);
+            releaseObjects();
             mObjectsSize = 0;
             break;
         }

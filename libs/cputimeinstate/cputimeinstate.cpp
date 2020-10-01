@@ -251,7 +251,7 @@ std::optional<std::vector<std::vector<uint64_t>>> getUidCpuFreqTimes(uint32_t ui
     for (uint32_t i = 0; i <= (maxFreqCount - 1) / FREQS_PER_ENTRY; ++i) {
         key.bucket = i;
         if (findMapEntry(gTisMapFd, &key, vals.data())) {
-            if (errno != ENOENT) return {};
+            if (errno != ENOENT || getFirstMapKey(gTisMapFd, &key)) return {};
             continue;
         }
 
@@ -362,7 +362,7 @@ std::optional<concurrent_time_t> getUidConcurrentTimes(uint32_t uid, bool retry)
     time_key_t key = {.uid = uid};
     for (key.bucket = 0; key.bucket <= (gNCpus - 1) / CPUS_PER_ENTRY; ++key.bucket) {
         if (findMapEntry(gConcurrentMapFd, &key, vals.data())) {
-            if (errno != ENOENT) return {};
+            if (errno != ENOENT || getFirstMapKey(gConcurrentMapFd, &key)) return {};
             continue;
         }
         auto offset = key.bucket * CPUS_PER_ENTRY;
@@ -489,7 +489,7 @@ bool clearUidTimes(uint32_t uid) {
         if (deleteMapEntry(gTisMapFd, &key) && errno != ENOENT) return false;
     }
 
-    concurrent_val_t czeros = {.policy = {0}, .active = {0}};
+    concurrent_val_t czeros = { .active = {0}, .policy = {0}, };
     std::vector<concurrent_val_t> cvals(gNCpus, czeros);
     for (key.bucket = 0; key.bucket <= (gNCpus - 1) / CPUS_PER_ENTRY; ++key.bucket) {
         if (writeToMapEntry(gConcurrentMapFd, &key, cvals.data(), BPF_EXIST) && errno != ENOENT)
