@@ -124,6 +124,7 @@ static const TracingCategory k_categories[] = {
     { "aidl",       "AIDL calls",               ATRACE_TAG_AIDL, { } },
     { "nnapi",      "NNAPI",                    ATRACE_TAG_NNAPI, { } },
     { "rro",        "Runtime Resource Overlay", ATRACE_TAG_RRO, { } },
+    { "sysprop",    "System Property",          ATRACE_TAG_SYSPROP, { } },
     { k_coreServiceCategory, "Core services", 0, { } },
     { k_pdxServiceCategory, "PDX services", 0, { } },
     { "sched",      "CPU Scheduling",   0, {
@@ -172,6 +173,8 @@ static const TracingCategory k_categories[] = {
         { OPT,      "events/clk/clk_enable/enable" },
         { OPT,      "events/power/cpu_frequency_limits/enable" },
         { OPT,      "events/power/suspend_resume/enable" },
+        { OPT,      "events/cpuhp/cpuhp_enter/enable" },
+        { OPT,      "events/cpuhp/cpuhp_exit/enable" },
     } },
     { "membus",     "Memory Bus Utilization", 0, {
         { REQ,      "events/memory_bus/enable" },

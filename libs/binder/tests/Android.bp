@@ -27,7 +27,9 @@ cc_test {
     defaults: ["binder_test_defaults"],
     srcs: ["binderDriverInterfaceTest.cpp"],
     compile_multilib: "32",
+    multilib: { lib32: { suffix: "" } },
     cflags: ["-DBINDER_IPC_32BIT=1"],
+    test_suites: ["vts"],
 }
 
 cc_test {
@@ -52,7 +54,10 @@ cc_test {
         "libutils",
     ],
     compile_multilib: "32",
+    multilib: { lib32: { suffix: "" } },
     cflags: ["-DBINDER_IPC_32BIT=1"],
+    test_suites: ["vts"],
+    require_root: true,
 }
 
 cc_test {
@@ -150,6 +155,7 @@ cc_test {
         "binderStabilityTest.cpp",
     ],
 
+    // critical that libbinder/libbinder_ndk are shared for VTS
     shared_libs: [
         "libbinder_ndk",
         "libbinder",
@@ -161,7 +167,7 @@ cc_test {
         "binderStabilityTestIface-ndk_platform",
     ],
 
-    test_suites: ["device-tests"],
+    test_suites: ["device-tests", "vts"],
     require_root: true,
 }
 
