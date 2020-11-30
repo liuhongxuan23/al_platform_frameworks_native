@@ -33,8 +33,7 @@ pub type TransactionCode = u32;
 
 /// Additional operation flags.
 ///
-/// Can be either 0 for a normal RPC, or [`IBinder::FLAG_ONEWAY`] for a
-/// one-way RPC.
+/// `IBinder::FLAG_*` values.
 pub type TransactionFlags = u32;
 
 /// Super-trait for Binder interfaces.
@@ -91,6 +90,8 @@ pub trait IBinder {
 
     /// Corresponds to TF_ONE_WAY -- an asynchronous call.
     const FLAG_ONEWAY: TransactionFlags = sys::FLAG_ONEWAY;
+    /// Corresponds to TF_CLEAR_BUF -- clear transaction buffers after call is made.
+    const FLAG_CLEAR_BUF: TransactionFlags = sys::FLAG_CLEAR_BUF;
 
     /// Is this object still alive?
     fn is_binder_alive(&self) -> bool;
@@ -532,7 +533,17 @@ macro_rules! declare_binder_interface {
             }
 
             fn on_transact(&self, code: $crate::TransactionCode, data: &$crate::Parcel, reply: &mut $crate::Parcel) -> $crate::Result<()> {
-                $on_transact(&*self.0, code, data, reply)
+                match $on_transact(&*self.0, code, data, reply) {
+                    // The C++ backend converts UNEXPECTED_NULL into an exception
+                    Err($crate::StatusCode::UNEXPECTED_NULL) => {
+                        let status = $crate::Status::new_exception(
+                            $crate::ExceptionCode::NULL_POINTER,
+                            None,
+                        );
+                        reply.write(&status)
+                    },
+                    result => result
+                }
             }
 
             fn get_class() -> $crate::InterfaceClass {

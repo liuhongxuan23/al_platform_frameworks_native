@@ -16,6 +16,13 @@
       "name": "binderTextOutputTest"
     },
     {
+      "name": "binderParcelTest"
+    },
+    {
+      "name": "binderParcelTest",
+      "host": true
+    },
+    {
       "name": "binderLibTest"
     },
     {
@@ -43,6 +50,12 @@
           "exclude-filter": "android.os.cts.StrictModeTest#testNonSdkApiUsage"
         }
       ]
+    },
+    {
+      "name": "libbinder_rs-internal_test"
+    },
+    {
+      "name": "rustBinderTest"
     }
   ]
 }

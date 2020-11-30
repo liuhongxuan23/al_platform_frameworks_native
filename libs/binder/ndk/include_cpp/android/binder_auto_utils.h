@@ -44,9 +44,14 @@ namespace ndk {
 class SpAIBinder {
    public:
     /**
+     * Default constructor.
+     */
+    SpAIBinder() : mBinder(nullptr) {}
+
+    /**
      * Takes ownership of one strong refcount of binder.
      */
-    explicit SpAIBinder(AIBinder* binder = nullptr) : mBinder(binder) {}
+    explicit SpAIBinder(AIBinder* binder) : mBinder(binder) {}
 
     /**
      * Convenience operator for implicitly constructing an SpAIBinder from nullptr. This is not
@@ -69,6 +74,9 @@ class SpAIBinder {
      * ownership of that other object.
      */
     SpAIBinder& operator=(const SpAIBinder& other) {
+        if (this == &other) {
+            return *this;
+        }
         AIBinder_incStrong(other.mBinder);
         set(other.mBinder);
         return *this;
@@ -165,8 +173,10 @@ class ScopedAResource {
     ScopedAResource& operator=(const ScopedAResource&) = delete;
 
     // move-constructing/assignment is okay
-    ScopedAResource(ScopedAResource&& other) : mT(std::move(other.mT)) { other.mT = DEFAULT; }
-    ScopedAResource& operator=(ScopedAResource&& other) {
+    ScopedAResource(ScopedAResource&& other) noexcept : mT(std::move(other.mT)) {
+        other.mT = DEFAULT;
+    }
+    ScopedAResource& operator=(ScopedAResource&& other) noexcept {
         set(other.mT);
         other.mT = DEFAULT;
         return *this;
@@ -199,6 +209,9 @@ class ScopedAStatus : public impl::ScopedAResource<AStatus*, void, AStatus_delet
    public:
     /**
      * Takes ownership of a.
+     *
+     * WARNING: this constructor is only expected to be used when reading a
+     *     status value. Use `ScopedAStatus::ok()` instead.
      */
     explicit ScopedAStatus(AStatus* a = nullptr) : ScopedAResource(a) {}
     ~ScopedAStatus() {}
@@ -305,7 +318,8 @@ class ScopedFileDescriptor : public impl::ScopedAResource<int, int, close, -1> {
     /**
      * Takes ownership of a.
      */
-    explicit ScopedFileDescriptor(int a = -1) : ScopedAResource(a) {}
+    ScopedFileDescriptor() : ScopedFileDescriptor(-1) {}
+    explicit ScopedFileDescriptor(int a) : ScopedAResource(a) {}
     ~ScopedFileDescriptor() {}
     ScopedFileDescriptor(ScopedFileDescriptor&&) = default;
     ScopedFileDescriptor& operator=(ScopedFileDescriptor&&) = default;

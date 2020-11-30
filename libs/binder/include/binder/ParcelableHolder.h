@@ -30,7 +30,7 @@ namespace os {
 class ParcelableHolder : public android::Parcelable {
 public:
     ParcelableHolder() = delete;
-    explicit ParcelableHolder(Stability stability) : mStability(stability){};
+    explicit ParcelableHolder(Stability stability) : mStability(stability){}
     virtual ~ParcelableHolder() = default;
     ParcelableHolder(const ParcelableHolder& other) {
         mParcelable = other.mParcelable;
@@ -40,7 +40,7 @@ public:
             mParcelPtr->appendFrom(other.mParcelPtr.get(), 0, other.mParcelPtr->dataSize());
         }
         mStability = other.mStability;
-    };
+    }
 
     status_t writeToParcel(Parcel* parcel) const override;
     status_t readFromParcel(const Parcel* parcel) override;
@@ -59,7 +59,6 @@ public:
 
     template <typename T>
     bool setParcelable(std::shared_ptr<T> p) {
-        std::lock_guard<std::mutex> l(mMutex);
         static_assert(std::is_base_of<Parcelable, T>::value, "T must be derived from Parcelable");
         if (p && this->getStability() > p->getStability()) {
             return false;
@@ -73,7 +72,6 @@ public:
     template <typename T>
     std::shared_ptr<T> getParcelable() const {
         static_assert(std::is_base_of<Parcelable, T>::value, "T must be derived from Parcelable");
-        std::lock_guard<std::mutex> l(mMutex);
         const std::string& parcelableDesc = T::getParcelableDescriptor();
         if (!this->mParcelPtr) {
             if (!this->mParcelable || !this->mParcelableName) {
@@ -103,7 +101,7 @@ public:
         return std::shared_ptr<T>(mParcelable, reinterpret_cast<T*>(mParcelable.get()));
     }
 
-    Stability getStability() const override { return mStability; };
+    Stability getStability() const override { return mStability; }
 
     inline bool operator!=(const ParcelableHolder& rhs) const {
         return std::tie(mParcelable, mParcelPtr, mStability) !=
@@ -135,7 +133,6 @@ private:
     mutable std::optional<std::string> mParcelableName;
     mutable std::unique_ptr<Parcel> mParcelPtr;
     Stability mStability;
-    mutable std::mutex mMutex;
 };
 } // namespace os
 } // namespace android
