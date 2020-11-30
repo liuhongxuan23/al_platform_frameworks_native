@@ -74,6 +74,7 @@ public:
     Vector<String16> listServices(int dumpsysPriority) override;
     sp<IBinder> waitForService(const String16& name16) override;
     bool isDeclared(const String16& name) override;
+    Vector<String16> getDeclaredInstances(const String16& interface) override;
 
     // for legacy ABI
     const String16& getInterfaceDescriptor() const override {
@@ -220,7 +221,7 @@ sp<IBinder> ServiceManagerShim::getService(const String16& name) const
 
     const bool isVendorService =
         strcmp(ProcessState::self()->getDriverName().c_str(), "/dev/vndbinder") == 0;
-    const long timeout = 5000;
+    constexpr int64_t timeout = 5000;
     int64_t startTime = uptimeMillis();
     // Vendor code can't access system properties
     if (!gSystemBootCompleted && !isVendorService) {
@@ -233,7 +234,7 @@ sp<IBinder> ServiceManagerShim::getService(const String16& name) const
 #endif
     }
     // retry interval in millisecond; note that vendor services stay at 100ms
-    const long sleepTime = gSystemBootCompleted ? 1000 : 100;
+    const useconds_t sleepTime = gSystemBootCompleted ? 1000 : 100;
 
     ALOGI("Waiting for service '%s' on '%s'...", String8(name).string(),
           ProcessState::self()->getDriverName().c_str());
@@ -309,7 +310,7 @@ sp<IBinder> ServiceManagerShim::waitForService(const String16& name16)
     // Simple RAII object to ensure a function call immediately before going out of scope
     class Defer {
     public:
-        Defer(std::function<void()>&& f) : mF(std::move(f)) {}
+        explicit Defer(std::function<void()>&& f) : mF(std::move(f)) {}
         ~Defer() { mF(); }
     private:
         std::function<void()> mF;
@@ -371,6 +372,20 @@ bool ServiceManagerShim::isDeclared(const String16& name) {
         return false;
     }
     return declared;
+}
+
+Vector<String16> ServiceManagerShim::getDeclaredInstances(const String16& interface) {
+    std::vector<std::string> out;
+    if (!mTheRealServiceManager->getDeclaredInstances(String8(interface).c_str(), &out).isOk()) {
+        return {};
+    }
+
+    Vector<String16> res;
+    res.setCapacity(out.size());
+    for (const std::string& instance : out) {
+        res.push(String16(instance.c_str()));
+    }
+    return res;
 }
 
 } // namespace android

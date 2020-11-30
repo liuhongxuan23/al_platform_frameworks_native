@@ -43,7 +43,6 @@ __BEGIN_DECLS
 
 #if __ANDROID_API__ >= 29
 
-// Also see TF_* in kernel's binder.h
 typedef uint32_t binder_flags_t;
 enum {
     /**
@@ -642,6 +641,23 @@ binder_status_t AIBinder_getExtension(AIBinder* binder, AIBinder** outExt) __INT
 binder_status_t AIBinder_setExtension(AIBinder* binder, AIBinder* ext) __INTRODUCED_IN(30);
 
 #endif  //__ANDROID_API__ >= 30
+
+#if __ANDROID_API__ >= 31
+
+/**
+ * Retrieve the class descriptor for the class.
+ *
+ * Available since API level 31.
+ *
+ * \param clazz the class to fetch the descriptor from
+ *
+ * \return the class descriptor string. This pointer will never be null; a
+ * descriptor is required to define a class. The pointer is owned by the class
+ * and will remain valid as long as the class does.
+ */
+const char* AIBinder_Class_getDescriptor(const AIBinder_Class* clazz) __INTRODUCED_IN(31);
+
+#endif  //__ANDROID_API__ >= 31
 
 __END_DECLS
 

@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#ifndef ANDROID_IPC_THREAD_STATE_H
-#define ANDROID_IPC_THREAD_STATE_H
+#pragma once
 
 #include <utils/Errors.h>
 #include <binder/Parcel.h>
@@ -147,7 +146,7 @@ public:
             void                blockUntilThreadAvailable();
 
             // Service manager registration
-            void                setTheContextObject(sp<BBinder> obj);
+            void                setTheContextObject(const sp<BBinder>& obj);
 
             // WARNING: DO NOT USE THIS API
             //
@@ -186,9 +185,8 @@ private:
     static  void                threadDestructor(void *st);
     static  void                freeBuffer(Parcel* parcel,
                                            const uint8_t* data, size_t dataSize,
-                                           const binder_size_t* objects, size_t objectsSize,
-                                           void* cookie);
-    
+                                           const binder_size_t* objects, size_t objectsSize);
+
     const   sp<ProcessState>    mProcess;
             Vector<BBinder*>    mPendingStrongDerefs;
             Vector<RefBase::weakref_type*> mPendingWeakDerefs;
@@ -214,5 +212,3 @@ private:
 } // namespace android
 
 // ---------------------------------------------------------------------------
-
-#endif // ANDROID_IPC_THREAD_STATE_H
