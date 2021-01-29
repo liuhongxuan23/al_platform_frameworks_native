@@ -43,7 +43,6 @@ __BEGIN_DECLS
 
 #if __ANDROID_API__ >= 29
 
-// Also see TF_* in kernel's binder.h
 typedef uint32_t binder_flags_t;
 enum {
     /**
@@ -642,6 +641,94 @@ binder_status_t AIBinder_getExtension(AIBinder* binder, AIBinder** outExt) __INT
 binder_status_t AIBinder_setExtension(AIBinder* binder, AIBinder* ext) __INTRODUCED_IN(30);
 
 #endif  //__ANDROID_API__ >= 30
+
+#if __ANDROID_API__ >= 31
+
+/**
+ * Retrieve the class descriptor for the class.
+ *
+ * Available since API level 31.
+ *
+ * \param clazz the class to fetch the descriptor from
+ *
+ * \return the class descriptor string. This pointer will never be null; a
+ * descriptor is required to define a class. The pointer is owned by the class
+ * and will remain valid as long as the class does.
+ */
+const char* AIBinder_Class_getDescriptor(const AIBinder_Class* clazz) __INTRODUCED_IN(31);
+
+/**
+ * Whether AIBinder is less than another.
+ *
+ * This provides a per-process-unique total ordering of binders where a null
+ * AIBinder* object is considered to be before all other binder objects.
+ * For instance, two binders refer to the same object in a local or remote
+ * process when both AIBinder_lt(a, b) and AIBinder(b, a) are false. This API
+ * might be used to insert and lookup binders in binary search trees.
+ *
+ * AIBinder* pointers themselves actually also create a per-process-unique total
+ * ordering. However, this ordering is inconsistent with AIBinder_Weak_lt for
+ * remote binders. So, in general, this function should be preferred.
+ *
+ * Available since API level 31.
+ *
+ * \param lhs comparison object
+ * \param rhs comparison object
+ *
+ * \return whether "lhs < rhs" is true
+ */
+bool AIBinder_lt(const AIBinder* lhs, const AIBinder* rhs);
+
+/**
+ * Clone an AIBinder_Weak. Useful because even if a weak binder promotes to a
+ * null value, after further binder transactions, it may no longer promote to a
+ * null value.
+ *
+ * Available since API level 31.
+ *
+ * \param weak Object to clone
+ *
+ * \return clone of the input parameter. This must be deleted with
+ * AIBinder_Weak_delete. Null if weak input parameter is also null.
+ */
+AIBinder_Weak* AIBinder_Weak_clone(const AIBinder_Weak* weak);
+
+/**
+ * Whether AIBinder_Weak is less than another.
+ *
+ * This provides a per-process-unique total ordering of binders which is exactly
+ * the same as AIBinder_lt. Similarly, a null AIBinder_Weak* is considered to be
+ * ordered before all other weak references.
+ *
+ * This function correctly distinguishes binders even if one is deallocated. So,
+ * for instance, an AIBinder_Weak* entry representing a deleted binder will
+ * never compare as equal to an AIBinder_Weak* entry which represents a
+ * different allocation of a binder, even if the two binders were originally
+ * allocated at the same address. That is:
+ *
+ *     AIBinder* a = ...; // imagine this has address 0x8
+ *     AIBinder_Weak* bWeak = AIBinder_Weak_new(a);
+ *     AIBinder_decStrong(a); // a may be deleted, if this is the last reference
+ *     AIBinder* b = ...; // imagine this has address 0x8 (same address as b)
+ *     AIBinder_Weak* bWeak = AIBinder_Weak_new(b);
+ *
+ * Then when a/b are compared with other binders, their order will be preserved,
+ * and it will either be the case that AIBinder_Weak_lt(aWeak, bWeak) OR
+ * AIBinder_Weak_lt(bWeak, aWeak), but not both.
+ *
+ * Unlike AIBinder*, the AIBinder_Weak* addresses themselves have nothing to do
+ * with the underlying binder.
+ *
+ * Available since API level 31.
+ *
+ * \param lhs comparison object
+ * \param rhs comparison object
+ *
+ * \return whether "lhs < rhs" is true
+ */
+bool AIBinder_Weak_lt(const AIBinder_Weak* lhs, const AIBinder_Weak* rhs);
+
+#endif  //__ANDROID_API__ >= 31
 
 __END_DECLS
 

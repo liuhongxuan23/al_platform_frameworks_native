@@ -450,6 +450,26 @@ class RunProfman : public ExecVHelper {
             AddArg("--boot-image-merge");
         }
 
+        // The percent won't exceed 100, otherwise, don't set it and use the
+        // default one set in profman.
+        uint32_t min_new_classes_percent_change = ::android::base::GetUintProperty<uint32_t>(
+            "dalvik.vm.bgdexopt.new-classes-percent",
+            /*default*/std::numeric_limits<uint32_t>::max());
+        if (min_new_classes_percent_change <= 100) {
+          AddArg("--min-new-classes-percent-change=" +
+                 std::to_string(min_new_classes_percent_change));
+        }
+
+        // The percent won't exceed 100, otherwise, don't set it and use the
+        // default one set in profman.
+        uint32_t min_new_methods_percent_change = ::android::base::GetUintProperty<uint32_t>(
+            "dalvik.vm.bgdexopt.new-methods-percent",
+            /*default*/std::numeric_limits<uint32_t>::max());
+        if (min_new_methods_percent_change <= 100) {
+          AddArg("--min-new-methods-percent-change=" +
+                 std::to_string(min_new_methods_percent_change));
+        }
+
         // Do not add after dex2oat_flags, they should override others for debugging.
         PrepareArgs(profman_bin);
     }
@@ -1798,10 +1818,13 @@ int dexopt(const char* dex_path, uid_t uid, const char* pkgname, const char* ins
 
     pid_t pid = fork();
     if (pid == 0) {
+        // Need to set schedpolicy before dropping privileges
+        // for cgroup migration. See details at b/175178520.
+        SetDex2OatScheduling(boot_complete);
+
         /* child -- drop privileges before continuing */
         drop_capabilities(uid);
 
-        SetDex2OatScheduling(boot_complete);
         if (flock(out_oat.fd(), LOCK_EX | LOCK_NB) != 0) {
             PLOG(ERROR) << "flock(" << out_oat.path() << ") failed";
             _exit(DexoptReturnCodes::kFlock);

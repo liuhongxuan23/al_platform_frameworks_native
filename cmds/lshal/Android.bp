@@ -16,6 +16,7 @@ cc_library_static {
     name: "liblshal",
     shared_libs: [
         "libbase",
+        "libbinderdebug",
         "libcutils",
         "libutils",
         "libhidlbase",
@@ -47,6 +48,7 @@ cc_defaults {
     name: "lshal_defaults",
     shared_libs: [
         "libbase",
+        "libbinderdebug",
         "libcutils",
         "libutils",
         "libhidlbase",
@@ -72,15 +74,18 @@ cc_binary {
 cc_test {
     name: "lshal_test",
     test_suites: ["device-tests"],
-    defaults: ["lshal_defaults"],
+    defaults: [
+        "libvintf_static_user_defaults",
+        "lshal_defaults"
+    ],
     gtest: true,
     static_libs: [
         "android.hardware.tests.inheritance@1.0",
         "libgmock",
+        "libvintf",
     ],
     shared_libs: [
         "libhidlbase",
-        "libvintf",
     ],
     srcs: [
         "test.cpp"
