@@ -49,6 +49,7 @@
 
 #include <private/binder/binder_module.h>
 #include "Static.h"
+#include "Utils.h"
 
 #define LOG_REFS(...)
 //#define LOG_REFS(...) ALOG(LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -77,9 +78,8 @@ namespace android {
 // many things compile this into prebuilts on the stack
 static_assert(sizeof(Parcel) == 60 || sizeof(Parcel) == 120);
 
-static pthread_mutex_t gParcelGlobalAllocSizeLock = PTHREAD_MUTEX_INITIALIZER;
-static size_t gParcelGlobalAllocSize = 0;
-static size_t gParcelGlobalAllocCount = 0;
+static std::atomic<size_t> gParcelGlobalAllocCount;
+static std::atomic<size_t> gParcelGlobalAllocSize;
 
 static size_t gMaxFds = 0;
 
@@ -164,14 +164,11 @@ static void release_object(const sp<ProcessState>& proc,
     ALOGE("Invalid object type 0x%08x", obj.hdr.type);
 }
 
-status_t Parcel::finishFlattenBinder(
-    const sp<IBinder>& binder, const flat_binder_object& flat)
+status_t Parcel::finishFlattenBinder(const sp<IBinder>& binder)
 {
-    status_t status = writeObject(flat, false);
-    if (status != OK) return status;
-
     internal::Stability::tryMarkCompilationUnit(binder.get());
-    return writeInt32(internal::Stability::get(binder.get()));
+    auto category = internal::Stability::getCategory(binder.get());
+    return writeInt32(category.repr());
 }
 
 status_t Parcel::finishUnflattenBinder(
@@ -181,7 +178,7 @@ status_t Parcel::finishUnflattenBinder(
     status_t status = readInt32(&stability);
     if (status != OK) return status;
 
-    status = internal::Stability::set(binder.get(), stability, true /*log*/);
+    status = internal::Stability::setRepr(binder.get(), stability, true /*log*/);
     if (status != OK) return status;
 
     *out = binder;
@@ -209,7 +206,7 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
             if (proxy == nullptr) {
                 ALOGE("null proxy");
             }
-            const int32_t handle = proxy ? proxy->handle() : 0;
+            const int32_t handle = proxy ? proxy->getPrivateAccessorForHandle().handle() : 0;
             obj.hdr.type = BINDER_TYPE_HANDLE;
             obj.binder = 0; /* Don't pass uninitialized stack data to a remote process */
             obj.handle = handle;
@@ -225,6 +222,9 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
             if (local->isRequestingSid()) {
                 obj.flags |= FLAT_BINDER_FLAG_TXN_SECURITY_CTX;
             }
+            if (local->isInheritRt()) {
+                obj.flags |= FLAT_BINDER_FLAG_INHERIT_RT;
+            }
             obj.hdr.type = BINDER_TYPE_BINDER;
             obj.binder = reinterpret_cast<uintptr_t>(local->getWeakRefs());
             obj.cookie = reinterpret_cast<uintptr_t>(local);
@@ -237,7 +237,10 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
 
     obj.flags |= schedBits;
 
-    return finishFlattenBinder(binder, obj);
+    status_t status = writeObject(obj, false);
+    if (status != OK) return status;
+
+    return finishFlattenBinder(binder);
 }
 
 status_t Parcel::unflattenBinder(sp<IBinder>* out) const
@@ -275,17 +278,11 @@ Parcel::~Parcel()
 }
 
 size_t Parcel::getGlobalAllocSize() {
-    pthread_mutex_lock(&gParcelGlobalAllocSizeLock);
-    size_t size = gParcelGlobalAllocSize;
-    pthread_mutex_unlock(&gParcelGlobalAllocSizeLock);
-    return size;
+    return gParcelGlobalAllocSize.load();
 }
 
 size_t Parcel::getGlobalAllocCount() {
-    pthread_mutex_lock(&gParcelGlobalAllocSizeLock);
-    size_t count = gParcelGlobalAllocCount;
-    pthread_mutex_unlock(&gParcelGlobalAllocSizeLock);
-    return count;
+    return gParcelGlobalAllocCount.load();
 }
 
 const uint8_t* Parcel::data() const
@@ -509,6 +506,11 @@ bool Parcel::hasFileDescriptors() const
     return mHasFds;
 }
 
+void Parcel::markSensitive() const
+{
+    mDeallocZero = true;
+}
+
 void Parcel::updateWorkSourceRequestHeaderPosition() const {
     // Only update the request headers once. We only want to point
     // to the first headers read/written.
@@ -527,14 +529,19 @@ constexpr int32_t kHeader = B_PACK_CHARS('S', 'Y', 'S', 'T');
 // Write RPC headers.  (previously just the interface token)
 status_t Parcel::writeInterfaceToken(const String16& interface)
 {
+    return writeInterfaceToken(interface.string(), interface.size());
+}
+
+status_t Parcel::writeInterfaceToken(const char16_t* str, size_t len) {
     const IPCThreadState* threadState = IPCThreadState::self();
     writeInt32(threadState->getStrictModePolicy() | STRICT_MODE_PENALTY_GATHER);
     updateWorkSourceRequestHeaderPosition();
     writeInt32(threadState->shouldPropagateWorkSource() ?
             threadState->getCallingWorkSourceUid() : IPCThreadState::kUnsetWorkSource);
     writeInt32(kHeader);
+
     // currently the interface identification token is just its name as a string
-    return writeString16(interface);
+    return writeString16(str, len);
 }
 
 bool Parcel::replaceCallingWorkSourceUid(uid_t uid)
@@ -1070,6 +1077,7 @@ status_t Parcel::writeString8(const char* str, size_t len)
 {
     if (str == nullptr) return writeInt32(-1);
 
+    // NOTE: Keep this logic in sync with android_os_Parcel.cpp
     status_t err = writeInt32(len);
     if (err == NO_ERROR) {
         uint8_t* data = (uint8_t*)writeInplace(len+sizeof(char));
@@ -1110,6 +1118,7 @@ status_t Parcel::writeString16(const char16_t* str, size_t len)
 {
     if (str == nullptr) return writeInt32(-1);
 
+    // NOTE: Keep this logic in sync with android_os_Parcel.cpp
     status_t err = writeInt32(len);
     if (err == NO_ERROR) {
         len *= sizeof(char16_t);
@@ -1468,6 +1477,31 @@ data_unsorted:
     goto data_sorted;
 }
 
+status_t Parcel::readVectorSizeWithCoarseBoundCheck(int32_t *size) const {
+    int32_t requestedSize;
+    const status_t status = readInt32(&requestedSize);
+    if (status != NO_ERROR) return status;
+
+    // We permit negative sizes, which indicate presence of a nullable vector,
+    // i.e. a vector embedded in std::optional, std::unique_ptr, or std::shared_ptr.
+    if (requestedSize > 0) {
+        // Check if there are fewer bytes than vector elements.
+        // A lower bound is 1 byte per element, satisfied by some enum and int8_t and uint8_t.
+        const size_t availableBytes = dataAvail();
+        if (static_cast<size_t>(requestedSize) > availableBytes) {
+            // We have a size that is greater than the number of bytes available.
+            // On bounds failure we do not 'rewind' position by 4 bytes of the size already read.
+            ALOGW("%s: rejecting out of bounds vector size (requestedSize):%d "
+                    "Parcel{dataAvail:%zu mDataSize:%zu mDataPos:%zu mDataCapacity:%zu}",
+                    __func__, requestedSize, availableBytes, mDataSize, mDataPos, mDataCapacity);
+            return BAD_VALUE;
+        }
+    }
+
+    *size = requestedSize;
+    return NO_ERROR;
+}
+
 status_t Parcel::read(void* outData, size_t len) const
 {
     if (len > INT32_MAX) {
@@ -1690,7 +1724,7 @@ status_t Parcel::readDoubleVector(std::vector<double>* val) const {
 status_t Parcel::readBoolVector(std::optional<std::vector<bool>>* val) const {
     const int32_t start = dataPosition();
     int32_t size;
-    status_t status = readInt32(&size);
+    status_t status = readVectorSizeWithCoarseBoundCheck(&size);
     val->reset();
 
     if (status != OK || size < 0) {
@@ -1712,7 +1746,7 @@ status_t Parcel::readBoolVector(std::optional<std::vector<bool>>* val) const {
 status_t Parcel::readBoolVector(std::unique_ptr<std::vector<bool>>* val) const {
     const int32_t start = dataPosition();
     int32_t size;
-    status_t status = readInt32(&size);
+    status_t status = readVectorSizeWithCoarseBoundCheck(&size);
     val->reset();
 
     if (status != OK || size < 0) {
@@ -1733,7 +1767,7 @@ status_t Parcel::readBoolVector(std::unique_ptr<std::vector<bool>>* val) const {
 
 status_t Parcel::readBoolVector(std::vector<bool>* val) const {
     int32_t size;
-    status_t status = readInt32(&size);
+    status_t status = readVectorSizeWithCoarseBoundCheck(&size);
 
     if (status != OK) {
         return status;
@@ -1907,17 +1941,6 @@ double Parcel::readDouble() const
 }
 
 #endif
-
-status_t Parcel::readIntPtr(intptr_t *pArg) const
-{
-    return readAligned(pArg);
-}
-
-
-intptr_t Parcel::readIntPtr() const
-{
-    return readAligned<intptr_t>();
-}
 
 status_t Parcel::readBool(bool *pArg) const
 {
@@ -2503,22 +2526,17 @@ size_t Parcel::ipcObjectsCount() const
 }
 
 void Parcel::ipcSetDataReference(const uint8_t* data, size_t dataSize,
-    const binder_size_t* objects, size_t objectsCount, release_func relFunc, void* relCookie)
+    const binder_size_t* objects, size_t objectsCount, release_func relFunc)
 {
-    binder_size_t minOffset = 0;
-    freeDataNoInit();
-    mError = NO_ERROR;
+    freeData();
+
     mData = const_cast<uint8_t*>(data);
     mDataSize = mDataCapacity = dataSize;
-    //ALOGI("setDataReference Setting data size of %p to %lu (pid=%d)", this, mDataSize, getpid());
-    mDataPos = 0;
-    ALOGV("setDataReference Setting data pos of %p to %zu", this, mDataPos);
     mObjects = const_cast<binder_size_t*>(objects);
     mObjectsSize = mObjectsCapacity = objectsCount;
-    mNextObjectHint = 0;
-    mObjectsSorted = false;
     mOwner = relFunc;
-    mOwnerCookie = relCookie;
+
+    binder_size_t minOffset = 0;
     for (size_t i = 0; i < mObjectsSize; i++) {
         binder_size_t offset = mObjects[i];
         if (offset < minOffset) {
@@ -2619,22 +2637,17 @@ void Parcel::freeDataNoInit()
     if (mOwner) {
         LOG_ALLOC("Parcel %p: freeing other owner data", this);
         //ALOGI("Freeing data ref of %p (pid=%d)", this, getpid());
-        mOwner(this, mData, mDataSize, mObjects, mObjectsSize, mOwnerCookie);
+        mOwner(this, mData, mDataSize, mObjects, mObjectsSize);
     } else {
         LOG_ALLOC("Parcel %p: freeing allocated data", this);
         releaseObjects();
         if (mData) {
             LOG_ALLOC("Parcel %p: freeing with %zu capacity", this, mDataCapacity);
-            pthread_mutex_lock(&gParcelGlobalAllocSizeLock);
-            if (mDataCapacity <= gParcelGlobalAllocSize) {
-              gParcelGlobalAllocSize = gParcelGlobalAllocSize - mDataCapacity;
-            } else {
-              gParcelGlobalAllocSize = 0;
+            gParcelGlobalAllocSize -= mDataCapacity;
+            gParcelGlobalAllocCount--;
+            if (mDeallocZero) {
+                zeroMemory(mData, mDataSize);
             }
-            if (gParcelGlobalAllocCount > 0) {
-              gParcelGlobalAllocCount--;
-            }
-            pthread_mutex_unlock(&gParcelGlobalAllocSizeLock);
             free(mData);
         }
         if (mObjects) free(mObjects);
@@ -2657,6 +2670,21 @@ status_t Parcel::growData(size_t len)
             : continueWrite(std::max(newSize, (size_t) 128));
 }
 
+static uint8_t* reallocZeroFree(uint8_t* data, size_t oldCapacity, size_t newCapacity, bool zero) {
+    if (!zero) {
+        return (uint8_t*)realloc(data, newCapacity);
+    }
+    uint8_t* newData = (uint8_t*)malloc(newCapacity);
+    if (!newData) {
+        return nullptr;
+    }
+
+    memcpy(newData, data, std::min(oldCapacity, newCapacity));
+    zeroMemory(data, oldCapacity);
+    free(data);
+    return newData;
+}
+
 status_t Parcel::restartWrite(size_t desired)
 {
     if (desired > INT32_MAX) {
@@ -2670,7 +2698,7 @@ status_t Parcel::restartWrite(size_t desired)
         return continueWrite(desired);
     }
 
-    uint8_t* data = (uint8_t*)realloc(mData, desired);
+    uint8_t* data = reallocZeroFree(mData, mDataCapacity, desired, mDeallocZero);
     if (!data && desired > mDataCapacity) {
         mError = NO_MEMORY;
         return NO_MEMORY;
@@ -2678,15 +2706,17 @@ status_t Parcel::restartWrite(size_t desired)
 
     releaseObjects();
 
-    if (data) {
+    if (data || desired == 0) {
         LOG_ALLOC("Parcel %p: restart from %zu to %zu capacity", this, mDataCapacity, desired);
-        pthread_mutex_lock(&gParcelGlobalAllocSizeLock);
-        gParcelGlobalAllocSize += desired;
-        gParcelGlobalAllocSize -= mDataCapacity;
+        if (mDataCapacity > desired) {
+            gParcelGlobalAllocSize -= (mDataCapacity - desired);
+        } else {
+            gParcelGlobalAllocSize += (desired - mDataCapacity);
+        }
+
         if (!mData) {
             gParcelGlobalAllocCount++;
         }
-        pthread_mutex_unlock(&gParcelGlobalAllocSizeLock);
         mData = data;
         mDataCapacity = desired;
     }
@@ -2770,14 +2800,12 @@ status_t Parcel::continueWrite(size_t desired)
             memcpy(objects, mObjects, objectsSize*sizeof(binder_size_t));
         }
         //ALOGI("Freeing data ref of %p (pid=%d)", this, getpid());
-        mOwner(this, mData, mDataSize, mObjects, mObjectsSize, mOwnerCookie);
+        mOwner(this, mData, mDataSize, mObjects, mObjectsSize);
         mOwner = nullptr;
 
         LOG_ALLOC("Parcel %p: taking ownership of %zu capacity", this, desired);
-        pthread_mutex_lock(&gParcelGlobalAllocSizeLock);
         gParcelGlobalAllocSize += desired;
         gParcelGlobalAllocCount++;
-        pthread_mutex_unlock(&gParcelGlobalAllocSizeLock);
 
         mData = data;
         mObjects = objects;
@@ -2821,14 +2849,12 @@ status_t Parcel::continueWrite(size_t desired)
 
         // We own the data, so we can just do a realloc().
         if (desired > mDataCapacity) {
-            uint8_t* data = (uint8_t*)realloc(mData, desired);
+            uint8_t* data = reallocZeroFree(mData, mDataCapacity, desired, mDeallocZero);
             if (data) {
                 LOG_ALLOC("Parcel %p: continue from %zu to %zu capacity", this, mDataCapacity,
                         desired);
-                pthread_mutex_lock(&gParcelGlobalAllocSizeLock);
                 gParcelGlobalAllocSize += desired;
                 gParcelGlobalAllocSize -= mDataCapacity;
-                pthread_mutex_unlock(&gParcelGlobalAllocSizeLock);
                 mData = data;
                 mDataCapacity = desired;
             } else {
@@ -2860,10 +2886,8 @@ status_t Parcel::continueWrite(size_t desired)
         }
 
         LOG_ALLOC("Parcel %p: allocating with %zu capacity", this, desired);
-        pthread_mutex_lock(&gParcelGlobalAllocSizeLock);
         gParcelGlobalAllocSize += desired;
         gParcelGlobalAllocCount++;
-        pthread_mutex_unlock(&gParcelGlobalAllocSizeLock);
 
         mData = data;
         mDataSize = mDataPos = 0;
@@ -2893,6 +2917,7 @@ void Parcel::initState()
     mHasFds = false;
     mFdsKnown = true;
     mAllowFds = true;
+    mDeallocZero = false;
     mOwner = nullptr;
     mOpenAshmemSize = 0;
     mWorkSourceRequestHeaderPosition = 0;

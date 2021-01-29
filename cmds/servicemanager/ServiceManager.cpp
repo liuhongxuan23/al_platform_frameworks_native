@@ -373,7 +373,6 @@ binder::Status ServiceManager::getDeclaredInstances(const std::string& interface
     outReturn->clear();
 
     for (const std::string& instance : allInstances) {
-        // TODO(b/169275998): allow checking policy only once for the interface
         if (mAccess->canFind(ctx, interface + "/" + instance)) {
             outReturn->push_back(instance);
         }
@@ -495,7 +494,7 @@ ssize_t ServiceManager::Service::getNodeStrongRefCount() {
     sp<BpBinder> bpBinder = binder->remoteBinder();
     if (bpBinder == nullptr) return -1;
 
-    return ProcessState::self()->getStrongRefCountForNodeByHandle(bpBinder->handle());
+    return ProcessState::self()->getStrongRefCountForNode(bpBinder);
 }
 
 void ServiceManager::handleClientCallbacks() {

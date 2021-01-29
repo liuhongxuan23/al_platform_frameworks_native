@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#ifndef ANDROID_PROCESS_STATE_H
-#define ANDROID_PROCESS_STATE_H
+#pragma once
 
 #include <binder/IBinder.h>
 #include <utils/KeyedVector.h>
@@ -71,7 +70,7 @@ public:
                                 // 2. Temporary strong references held by the kernel during a
                                 //    transaction on the node.
                                 // It does NOT include local strong references to the node
-            ssize_t             getStrongRefCountForNodeByHandle(int32_t handle);
+            ssize_t             getStrongRefCountForNode(const sp<BpBinder>& binder);
 
             enum class CallRestriction {
                 // all calls okay
@@ -108,11 +107,14 @@ private:
             int                 mDriverFD;
             void*               mVMStart;
 
-            // Protects thread count variable below.
+            // Protects thread count and wait variables below.
             pthread_mutex_t     mThreadCountLock;
+            // Broadcast whenever mWaitingForThreads > 0
             pthread_cond_t      mThreadCountDecrement;
             // Number of binder threads current executing a command.
             size_t              mExecutingThreadsCount;
+            // Number of threads calling IPCThreadState::blockUntilThreadAvailable()
+            size_t              mWaitingForThreads;
             // Maximum number for binder threads allowed for this process.
             size_t              mMaxThreads;
             // Time when thread pool was emptied
@@ -132,5 +134,3 @@ private:
 } // namespace android
 
 // ---------------------------------------------------------------------------
-
-#endif // ANDROID_PROCESS_STATE_H
