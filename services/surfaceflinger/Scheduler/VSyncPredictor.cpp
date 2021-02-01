@@ -78,8 +78,12 @@ bool VSyncPredictor::addVsyncTimestamp(nsecs_t timestamp) {
 
     if (!validate(timestamp)) {
         // VSR could elect to ignore the incongruent timestamp or resetModel(). If ts is ignored,
-        // don't insert this ts into mTimestamps ringbuffer.
-        if (!mTimestamps.empty()) {
+        // don't insert this ts into mTimestamps ringbuffer. If we are still
+        // in the learning phase we should just clear all timestamps and start
+        // over.
+        if (mTimestamps.size() < kMinimumSamplesForPrediction) {
+            clearTimestamps();
+        } else if (!mTimestamps.empty()) {
             mKnownTimestamp =
                     std::max(timestamp, *std::max_element(mTimestamps.begin(), mTimestamps.end()));
         } else {
@@ -255,21 +259,9 @@ void VSyncPredictor::clearTimestamps() {
     }
 }
 
-bool VSyncPredictor::needsMoreSamples(nsecs_t now) const {
-    using namespace std::literals::chrono_literals;
+bool VSyncPredictor::needsMoreSamples() const {
     std::lock_guard<std::mutex> lk(mMutex);
-    bool needsMoreSamples = true;
-    if (mTimestamps.size() >= kMinimumSamplesForPrediction) {
-        nsecs_t constexpr aLongTime =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(500ms).count();
-        if (!(mLastTimestampIndex < 0 || mTimestamps.empty())) {
-            auto const lastTimestamp = mTimestamps[mLastTimestampIndex];
-            needsMoreSamples = !((lastTimestamp + aLongTime) > now);
-        }
-    }
-
-    ATRACE_INT("VSP-moreSamples", needsMoreSamples);
-    return needsMoreSamples;
+    return mTimestamps.size() < kMinimumSamplesForPrediction;
 }
 
 void VSyncPredictor::resetModel() {

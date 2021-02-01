@@ -494,7 +494,7 @@ ssize_t ServiceManager::Service::getNodeStrongRefCount() {
     sp<BpBinder> bpBinder = binder->remoteBinder();
     if (bpBinder == nullptr) return -1;
 
-    return ProcessState::self()->getStrongRefCountForNodeByHandle(bpBinder->handle());
+    return ProcessState::self()->getStrongRefCountForNode(bpBinder);
 }
 
 void ServiceManager::handleClientCallbacks() {
@@ -619,6 +619,23 @@ Status ServiceManager::tryUnregisterService(const std::string& name, const sp<IB
     }
 
     mNameToService.erase(name);
+
+    return Status::ok();
+}
+
+Status ServiceManager::getServiceDebugInfo(std::vector<ServiceDebugInfo>* outReturn) {
+    if (!mAccess->canList(mAccess->getCallingContext())) {
+        return Status::fromExceptionCode(Status::EX_SECURITY);
+    }
+
+    outReturn->reserve(mNameToService.size());
+    for (auto const& [name, service] : mNameToService) {
+        ServiceDebugInfo info;
+        info.name = name;
+        info.debugPid = service.debugPid;
+
+        outReturn->push_back(std::move(info));
+    }
 
     return Status::ok();
 }
