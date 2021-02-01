@@ -173,12 +173,9 @@ class DumpstateListener : public BnDumpstateListener {
         return binder::Status::ok();
     }
 
-    binder::Status onUiIntensiveBugreportDumpsFinished(const android::String16& callingpackage)
-        override {
+    binder::Status onUiIntensiveBugreportDumpsFinished() override {
         std::lock_guard <std::mutex> lock(lock_);
-        std::string callingpackageUtf8 = std::string(String8(callingpackage).string());
-        dprintf(out_fd_, "\rCalling package of ui intensive bugreport dumps finished: %s",
-                callingpackageUtf8.c_str());
+        dprintf(out_fd_, "\rUi intensive bugreport dumps finished");
         return binder::Status::ok();
     }
 
@@ -313,8 +310,12 @@ TEST_F(ZippedBugReportContentsTest, ContainsSomeFileSystemFiles) {
     // FS/proc/*/mountinfo size > 0
     FileExists("FS/proc/1/mountinfo", 0U, 100000U);
 
-    // FS/data/misc/profiles/cur/0/*/primary.prof size > 0
-    FileExists("FS/data/misc/profiles/cur/0/com.android.phone/primary.prof", 0U, 100000U);
+    // FS/data/misc/profiles/cur/0/*/primary.prof should exist. Also, since dumpstate only adds
+    // profiles to the zip in the non-user build, a build checking is necessary here.
+    if (!PropertiesHelper::IsUserBuild()) {
+        ZipEntry entry;
+        GetEntry(handle, "FS/data/misc/profiles/cur/0/com.android.phone/primary.prof", &entry);
+    }
 }
 
 /**
@@ -322,6 +323,16 @@ TEST_F(ZippedBugReportContentsTest, ContainsSomeFileSystemFiles) {
  */
 class BugreportSectionTest : public Test {
   public:
+    ZipArchiveHandle handle;
+
+    void SetUp() {
+        ASSERT_EQ(OpenArchive(ZippedBugreportGenerationTest::getZipFilePath().c_str(), &handle), 0);
+    }
+
+    void TearDown() {
+        CloseArchive(handle);
+    }
+
     static void SetUpTestCase() {
         ParseSections(ZippedBugreportGenerationTest::getZipFilePath().c_str(),
                       ZippedBugreportGenerationTest::sections.get());
@@ -345,6 +356,19 @@ class BugreportSectionTest : public Test {
             }
         }
         FAIL() << sectionName << " not found.";
+    }
+
+    /**
+     * Whether or not the content of the section is injected by other commands.
+     */
+    bool IsContentInjectedByOthers(const std::string& line) {
+        // Command header such as `------ APP ACTIVITIES (/system/bin/dumpsys activity -v) ------`.
+        static const std::regex kCommandHeader = std::regex{"------ .+ \\(.+\\) ------"};
+        std::smatch match;
+        if (std::regex_match(line, match, kCommandHeader)) {
+          return true;
+        }
+        return false;
     }
 };
 
@@ -401,6 +425,28 @@ TEST_F(BugreportSectionTest, BatteryStatsSectionGenerated) {
 
 TEST_F(BugreportSectionTest, DISABLED_WifiSectionGenerated) {
     SectionExists("wifi", /* bytes= */ 100000);
+}
+
+TEST_F(BugreportSectionTest, NoInjectedContentByOtherCommand) {
+    // Extract the main entry to a temp file
+    TemporaryFile tmp_binary;
+    ASSERT_NE(-1, tmp_binary.fd);
+    ExtractBugreport(&handle, tmp_binary.fd);
+
+    // Read line by line and identify sections
+    std::ifstream ifs(tmp_binary.path, std::ifstream::in);
+    std::string line;
+    std::string current_section_name;
+    while (std::getline(ifs, line)) {
+        std::string section_name;
+        if (IsSectionStart(line, &section_name)) {
+            current_section_name = section_name;
+        } else if (IsSectionEnd(line)) {
+            current_section_name = "";
+        } else if (!current_section_name.empty()) {
+            EXPECT_FALSE(IsContentInjectedByOthers(line));
+        }
+    }
 }
 
 class DumpstateBinderTest : public Test {

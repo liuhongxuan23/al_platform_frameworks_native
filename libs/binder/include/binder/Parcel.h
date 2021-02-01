@@ -504,9 +504,6 @@ private:
                                             const binder_size_t* objects, size_t objectsCount,
                                             release_func relFunc);
 
-                        Parcel(const Parcel& o);
-    Parcel&             operator=(const Parcel& o);
-    
     status_t            finishWrite(size_t len);
     void                releaseObjects();
     void                acquireObjects();
@@ -520,6 +517,11 @@ private:
     void                initState();
     void                scanForFds() const;
     status_t            validateReadData(size_t len) const;
+
+    // Reads an int32 size and does a coarse bounds check against the number
+    // of available bytes in the Parcel.
+    status_t            readVectorSizeWithCoarseBoundCheck(int32_t *size) const;
+
     void                updateWorkSourceRequestHeaderPosition() const;
 
     status_t            finishFlattenBinder(const sp<IBinder>& binder);
@@ -790,6 +792,7 @@ status_t Parcel::writeVectorSize(const std::unique_ptr<std::vector<T>>& val) {
 template<typename T>
 status_t Parcel::resizeOutVector(std::vector<T>* val) const {
     int32_t size;
+    // used for allocating 'out' vector args, do not use readVectorSizeWithCoarseBoundCheck() here
     status_t err = readInt32(&size);
     if (err != NO_ERROR) {
         return err;
@@ -805,6 +808,7 @@ status_t Parcel::resizeOutVector(std::vector<T>* val) const {
 template<typename T>
 status_t Parcel::resizeOutVector(std::optional<std::vector<T>>* val) const {
     int32_t size;
+    // used for allocating 'out' vector args, do not use readVectorSizeWithCoarseBoundCheck() here
     status_t err = readInt32(&size);
     if (err != NO_ERROR) {
         return err;
@@ -821,6 +825,7 @@ status_t Parcel::resizeOutVector(std::optional<std::vector<T>>* val) const {
 template<typename T>
 status_t Parcel::resizeOutVector(std::unique_ptr<std::vector<T>>* val) const {
     int32_t size;
+    // used for allocating 'out' vector args, do not use readVectorSizeWithCoarseBoundCheck() here
     status_t err = readInt32(&size);
     if (err != NO_ERROR) {
         return err;
@@ -837,7 +842,7 @@ status_t Parcel::resizeOutVector(std::unique_ptr<std::vector<T>>* val) const {
 template<typename T>
 status_t Parcel::reserveOutVector(std::vector<T>* val, size_t* size) const {
     int32_t read_size;
-    status_t err = readInt32(&read_size);
+    status_t err = readVectorSizeWithCoarseBoundCheck(&read_size);
     if (err != NO_ERROR) {
         return err;
     }
@@ -853,7 +858,7 @@ status_t Parcel::reserveOutVector(std::vector<T>* val, size_t* size) const {
 template<typename T>
 status_t Parcel::reserveOutVector(std::optional<std::vector<T>>* val, size_t* size) const {
     int32_t read_size;
-    status_t err = readInt32(&read_size);
+    status_t err = readVectorSizeWithCoarseBoundCheck(&read_size);
     if (err != NO_ERROR) {
         return err;
     }
@@ -873,7 +878,7 @@ template<typename T>
 status_t Parcel::reserveOutVector(std::unique_ptr<std::vector<T>>* val,
                                   size_t* size) const {
     int32_t read_size;
-    status_t err = readInt32(&read_size);
+    status_t err = readVectorSizeWithCoarseBoundCheck(&read_size);
     if (err != NO_ERROR) {
         return err;
     }
@@ -926,7 +931,7 @@ status_t Parcel::unsafeReadTypedVector(
         std::vector<T>* val,
         status_t(Parcel::*read_func)(U*) const) const {
     int32_t size;
-    status_t status = this->readInt32(&size);
+    status_t status = this->readVectorSizeWithCoarseBoundCheck(&size);
 
     if (status != OK) {
         return status;
@@ -968,7 +973,7 @@ status_t Parcel::readNullableTypedVector(std::optional<std::vector<T>>* val,
                                          status_t(Parcel::*read_func)(T*) const) const {
     const size_t start = dataPosition();
     int32_t size;
-    status_t status = readInt32(&size);
+    status_t status = readVectorSizeWithCoarseBoundCheck(&size);
     val->reset();
 
     if (status != OK || size < 0) {
@@ -992,7 +997,7 @@ status_t Parcel::readNullableTypedVector(std::unique_ptr<std::vector<T>>* val,
                                          status_t(Parcel::*read_func)(T*) const) const {
     const size_t start = dataPosition();
     int32_t size;
-    status_t status = readInt32(&size);
+    status_t status = readVectorSizeWithCoarseBoundCheck(&size);
     val->reset();
 
     if (status != OK || size < 0) {
@@ -1096,7 +1101,7 @@ template<typename T>
 status_t Parcel::readParcelableVector(std::optional<std::vector<std::optional<T>>>* val) const {
     const size_t start = dataPosition();
     int32_t size;
-    status_t status = readInt32(&size);
+    status_t status = readVectorSizeWithCoarseBoundCheck(&size);
     val->reset();
 
     if (status != OK || size < 0) {
@@ -1120,7 +1125,7 @@ template<typename T>
 status_t Parcel::readParcelableVector(std::unique_ptr<std::vector<std::unique_ptr<T>>>* val) const {
     const size_t start = dataPosition();
     int32_t size;
-    status_t status = readInt32(&size);
+    status_t status = readVectorSizeWithCoarseBoundCheck(&size);
     val->reset();
 
     if (status != OK || size < 0) {

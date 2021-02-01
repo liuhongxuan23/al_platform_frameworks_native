@@ -206,7 +206,7 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
             if (proxy == nullptr) {
                 ALOGE("null proxy");
             }
-            const int32_t handle = proxy ? proxy->handle() : 0;
+            const int32_t handle = proxy ? proxy->getPrivateAccessorForHandle().handle() : 0;
             obj.hdr.type = BINDER_TYPE_HANDLE;
             obj.binder = 0; /* Don't pass uninitialized stack data to a remote process */
             obj.handle = handle;
@@ -1477,6 +1477,31 @@ data_unsorted:
     goto data_sorted;
 }
 
+status_t Parcel::readVectorSizeWithCoarseBoundCheck(int32_t *size) const {
+    int32_t requestedSize;
+    const status_t status = readInt32(&requestedSize);
+    if (status != NO_ERROR) return status;
+
+    // We permit negative sizes, which indicate presence of a nullable vector,
+    // i.e. a vector embedded in std::optional, std::unique_ptr, or std::shared_ptr.
+    if (requestedSize > 0) {
+        // Check if there are fewer bytes than vector elements.
+        // A lower bound is 1 byte per element, satisfied by some enum and int8_t and uint8_t.
+        const size_t availableBytes = dataAvail();
+        if (static_cast<size_t>(requestedSize) > availableBytes) {
+            // We have a size that is greater than the number of bytes available.
+            // On bounds failure we do not 'rewind' position by 4 bytes of the size already read.
+            ALOGW("%s: rejecting out of bounds vector size (requestedSize):%d "
+                    "Parcel{dataAvail:%zu mDataSize:%zu mDataPos:%zu mDataCapacity:%zu}",
+                    __func__, requestedSize, availableBytes, mDataSize, mDataPos, mDataCapacity);
+            return BAD_VALUE;
+        }
+    }
+
+    *size = requestedSize;
+    return NO_ERROR;
+}
+
 status_t Parcel::read(void* outData, size_t len) const
 {
     if (len > INT32_MAX) {
@@ -1699,7 +1724,7 @@ status_t Parcel::readDoubleVector(std::vector<double>* val) const {
 status_t Parcel::readBoolVector(std::optional<std::vector<bool>>* val) const {
     const int32_t start = dataPosition();
     int32_t size;
-    status_t status = readInt32(&size);
+    status_t status = readVectorSizeWithCoarseBoundCheck(&size);
     val->reset();
 
     if (status != OK || size < 0) {
@@ -1721,7 +1746,7 @@ status_t Parcel::readBoolVector(std::optional<std::vector<bool>>* val) const {
 status_t Parcel::readBoolVector(std::unique_ptr<std::vector<bool>>* val) const {
     const int32_t start = dataPosition();
     int32_t size;
-    status_t status = readInt32(&size);
+    status_t status = readVectorSizeWithCoarseBoundCheck(&size);
     val->reset();
 
     if (status != OK || size < 0) {
@@ -1742,7 +1767,7 @@ status_t Parcel::readBoolVector(std::unique_ptr<std::vector<bool>>* val) const {
 
 status_t Parcel::readBoolVector(std::vector<bool>* val) const {
     int32_t size;
-    status_t status = readInt32(&size);
+    status_t status = readVectorSizeWithCoarseBoundCheck(&size);
 
     if (status != OK) {
         return status;
@@ -2503,19 +2528,15 @@ size_t Parcel::ipcObjectsCount() const
 void Parcel::ipcSetDataReference(const uint8_t* data, size_t dataSize,
     const binder_size_t* objects, size_t objectsCount, release_func relFunc)
 {
-    binder_size_t minOffset = 0;
-    freeDataNoInit();
-    mError = NO_ERROR;
+    freeData();
+
     mData = const_cast<uint8_t*>(data);
     mDataSize = mDataCapacity = dataSize;
-    //ALOGI("setDataReference Setting data size of %p to %lu (pid=%d)", this, mDataSize, getpid());
-    mDataPos = 0;
-    ALOGV("setDataReference Setting data pos of %p to %zu", this, mDataPos);
     mObjects = const_cast<binder_size_t*>(objects);
     mObjectsSize = mObjectsCapacity = objectsCount;
-    mNextObjectHint = 0;
-    mObjectsSorted = false;
     mOwner = relFunc;
+
+    binder_size_t minOffset = 0;
     for (size_t i = 0; i < mObjectsSize; i++) {
         binder_size_t offset = mObjects[i];
         if (offset < minOffset) {
@@ -2685,7 +2706,7 @@ status_t Parcel::restartWrite(size_t desired)
 
     releaseObjects();
 
-    if (data) {
+    if (data || desired == 0) {
         LOG_ALLOC("Parcel %p: restart from %zu to %zu capacity", this, mDataCapacity, desired);
         if (mDataCapacity > desired) {
             gParcelGlobalAllocSize -= (mDataCapacity - desired);
