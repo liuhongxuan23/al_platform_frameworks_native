@@ -53,7 +53,7 @@
 #include <sys/types.h>
 
 #if !defined(__INTRODUCED_IN)
-#define __INTRODUCED_IN(30) /* Introduced in API level 30 */
+#define __INTRODUCED_IN(__api_level) /* nothing */
 #endif
 
 #ifdef __cplusplus
@@ -108,8 +108,6 @@ typedef struct AThermalManager AThermalManager;
  * pointer provided by the client that registered a callback.
  */
 typedef void (*AThermal_StatusCallback)(void *data, AThermalStatus status);
-
-#if __ANDROID_API__ >= 30
 
 /**
   * Acquire an instance of the thermal manager. This must be freed using
@@ -178,8 +176,6 @@ int AThermal_registerThermalStatusListener(AThermalManager *manager,
  */
 int AThermal_unregisterThermalStatusListener(AThermalManager *manager,
         AThermal_StatusCallback callback, void *data) __INTRODUCED_IN(30);
-
-#endif  //  __ANDROID_API__ >= 30
 
 #ifdef __cplusplus
 }

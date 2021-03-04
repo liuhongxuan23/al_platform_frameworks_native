@@ -1208,10 +1208,6 @@ static void DumpBlockStatFiles() {
 
 static void DumpPacketStats() {
     DumpFile("NETWORK DEV INFO", "/proc/net/dev");
-    DumpFile("QTAGUID NETWORK INTERFACES INFO", "/proc/net/xt_qtaguid/iface_stat_all");
-    DumpFile("QTAGUID NETWORK INTERFACES INFO (xt)", "/proc/net/xt_qtaguid/iface_stat_fmt");
-    DumpFile("QTAGUID CTRL INFO", "/proc/net/xt_qtaguid/ctrl");
-    DumpFile("QTAGUID STATS INFO", "/proc/net/xt_qtaguid/stats");
 }
 
 static void DumpIpAddrAndRules() {
@@ -1656,8 +1652,6 @@ static Dumpstate::RunStatus dumpstate() {
     for_each_tid(show_wchan, "BLOCKED PROCESS WAIT-CHANNELS");
     for_each_pid(show_showtime, "PROCESS TIMES (pid cmd user system iowait+percentage)");
 
-    /* Dump Bluetooth HCI logs */
-    ds.AddDir("/data/misc/bluetooth/logs", true);
     /* Dump Nfc NCI logs */
     ds.AddDir("/data/misc/nfc/logs", true);
 
@@ -1742,6 +1736,9 @@ static Dumpstate::RunStatus dumpstate() {
     printf("========================================================\n");
 
     RUN_SLOW_FUNCTION_WITH_CONSENT_CHECK(RunDumpsysNormal);
+
+    /* Dump Bluetooth HCI logs after getting bluetooth_manager dumpsys */
+    ds.AddDir("/data/misc/bluetooth/logs", true);
 
     if (ds.dump_pool_) {
         WAIT_TASK_WITH_CONSENT_CHECK(DUMP_CHECKINS_TASK, ds.dump_pool_);
@@ -1845,10 +1842,8 @@ Dumpstate::RunStatus Dumpstate::DumpstateDefaultAfterCritical() {
     RunCommand("IOTOP", {"iotop", "-n", "1", "-m", "100"});
 
     // Gather shared memory buffer info if the product implements it
-    struct stat st;
-    if (!stat("/product/bin/dmabuf_dump", &st)) {
-        RunCommand("Dmabuf dump", {"/product/bin/dmabuf_dump"});
-    }
+    RunCommand("Dmabuf dump", {"dmabuf_dump"});
+    RunCommand("Dmabuf per-buffer/per-exporter/per-device stats", {"dmabuf_dump", "-b"});
 
     DumpFile("PSI cpu", "/proc/pressure/cpu");
     DumpFile("PSI memory", "/proc/pressure/memory");
@@ -2061,7 +2056,7 @@ static void DumpstateWifiOnly() {
 }
 
 Dumpstate::RunStatus Dumpstate::DumpTraces(const char** path) {
-    const std::string temp_file_pattern = "/data/anr/dumptrace_XXXXXX";
+    const std::string temp_file_pattern = ds.bugreport_internal_dir_ + "/dumptrace_XXXXXX";
     const size_t buf_size = temp_file_pattern.length() + 1;
     std::unique_ptr<char[]> file_name_buf(new char[buf_size]);
     memcpy(file_name_buf.get(), temp_file_pattern.c_str(), buf_size);
@@ -3068,6 +3063,9 @@ void Dumpstate::CleanupTmpFiles() {
     android::os::UnlinkAndLogOnError(tmp_path_);
     android::os::UnlinkAndLogOnError(screenshot_path_);
     android::os::UnlinkAndLogOnError(path_);
+    if (dump_traces_path != nullptr) {
+        android::os::UnlinkAndLogOnError(dump_traces_path);
+    }
 }
 
 void Dumpstate::EnableParallelRunIfNeeded() {

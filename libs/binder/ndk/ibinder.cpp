@@ -181,7 +181,7 @@ status_t ABBinder::onTransact(transaction_code_t code, const Parcel& data, Parce
 
         binder_status_t status = getClass()->onTransact(this, code, &in, &out);
         return PruneStatusT(status);
-    } else if (code == SHELL_COMMAND_TRANSACTION && getClass()->handleShellCommand != nullptr) {
+    } else if (code == SHELL_COMMAND_TRANSACTION) {
         int in = data.readFileDescriptor();
         int out = data.readFileDescriptor();
         int err = data.readFileDescriptor();
@@ -595,13 +595,6 @@ binder_status_t AIBinder_prepareTransaction(AIBinder* binder, AParcel** in) {
                    << ": Class must be defined for a remote binder transaction. See "
                       "AIBinder_associateClass.";
         return STATUS_INVALID_OPERATION;
-    }
-
-    if (!binder->isRemote()) {
-        LOG(WARNING) << "A binder object at " << binder
-                     << " is being transacted on, however, this object is in the same process as "
-                        "its proxy. Transacting with this binder is expensive compared to just "
-                        "calling the corresponding functionality in the same process.";
     }
 
     *in = new AParcel(binder);

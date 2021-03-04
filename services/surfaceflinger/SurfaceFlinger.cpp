@@ -596,13 +596,6 @@ void SurfaceFlinger::bootFinished()
     if (mWindowManager != 0) {
         mWindowManager->linkToDeath(static_cast<IBinder::DeathRecipient*>(this));
     }
-    sp<IBinder> input(defaultServiceManager()->getService(
-            String16("inputflinger")));
-    if (input == nullptr) {
-        ALOGE("Failed to link to input service");
-    } else {
-        mInputFlinger = interface_cast<IInputFlinger>(input);
-    }
 
     // stop boot animation
     // formerly we would just kill the process, but we now ask it to exit so it
@@ -613,7 +606,15 @@ void SurfaceFlinger::bootFinished()
     LOG_EVENT_LONG(LOGTAG_SF_STOP_BOOTANIM,
                    ns2ms(systemTime(SYSTEM_TIME_MONOTONIC)));
 
-    static_cast<void>(schedule([this] {
+    sp<IBinder> input(defaultServiceManager()->getService(String16("inputflinger")));
+
+    static_cast<void>(schedule([=] {
+        if (input == nullptr) {
+            ALOGE("Failed to link to input service");
+        } else {
+            mInputFlinger = interface_cast<IInputFlinger>(input);
+        }
+
         readPersistentProperties();
         mPowerAdvisor.onBootFinished();
         mBootStage = BootStage::FINISHED;
@@ -1725,8 +1726,14 @@ void SurfaceFlinger::onMessageInvalidate(nsecs_t expectedVSyncTime) {
     // calculate the expected present time once and use the cached
     // value throughout this frame to make sure all layers are
     // seeing this same value.
-    const nsecs_t lastExpectedPresentTime = mExpectedPresentTime.load();
-    mExpectedPresentTime = expectedVSyncTime;
+    if (expectedVSyncTime >= frameStart) {
+        mExpectedPresentTime = expectedVSyncTime;
+    } else {
+        mExpectedPresentTime = mScheduler->getDispSyncExpectedPresentTime(frameStart);
+    }
+
+    const nsecs_t lastScheduledPresentTime = mScheduledPresentTime;
+    mScheduledPresentTime = expectedVSyncTime;
 
     // When Backpressure propagation is enabled we want to give a small grace period
     // for the present fence to fire instead of just giving up on this frame to handle cases
@@ -1756,7 +1763,7 @@ void SurfaceFlinger::onMessageInvalidate(nsecs_t expectedVSyncTime) {
     const TracedOrdinal<bool> frameMissed = {"PrevFrameMissed",
                                              framePending ||
                                                      (previousPresentTime >= 0 &&
-                                                      (lastExpectedPresentTime <
+                                                      (lastScheduledPresentTime <
                                                        previousPresentTime - frameMissedSlop))};
     const TracedOrdinal<bool> hwcFrameMissed = {"PrevHwcFrameMissed",
                                                 mHadDeviceComposition && frameMissed};

@@ -1130,23 +1130,6 @@ bool maybe_open_oat_and_vdex_file(const std::string& apk_path,
     return true;
 }
 
-// Updates the access times of out_oat_path based on those from apk_path.
-void update_out_oat_access_times(const char* apk_path, const char* out_oat_path) {
-    struct stat input_stat;
-    memset(&input_stat, 0, sizeof(input_stat));
-    if (stat(apk_path, &input_stat) != 0) {
-        PLOG(ERROR) << "Could not stat " << apk_path << " during dexopt";
-        return;
-    }
-
-    struct utimbuf ut;
-    ut.actime = input_stat.st_atime;
-    ut.modtime = input_stat.st_mtime;
-    if (utime(out_oat_path, &ut) != 0) {
-        PLOG(WARNING) << "Could not update access times for " << apk_path << " during dexopt";
-    }
-}
-
 // Runs (execv) dexoptanalyzer on the given arguments.
 // The analyzer will check if the dex_file needs to be (re)compiled to match the compiler_filter.
 // If this is for a profile guided compilation, profile_was_updated will tell whether or not
@@ -1843,8 +1826,6 @@ int dexopt(const char* dex_path, uid_t uid, const char* pkgname, const char* ins
         }
     }
 
-    update_out_oat_access_times(dex_path, out_oat.path().c_str());
-
     // We've been successful, don't delete output.
     out_oat.DisableCleanup();
     out_vdex.DisableCleanup();
@@ -2131,8 +2112,9 @@ static bool move_ab_path(const std::string& b_path, const std::string& a_path) {
     {
         struct stat s;
         if (stat(b_path.c_str(), &s) != 0) {
-            // Silently ignore for now. The service calling this isn't smart enough to understand
-            // lack of artifacts at the moment.
+            // Ignore for now. The service calling this isn't smart enough to
+            // understand lack of artifacts at the moment.
+            LOG(VERBOSE) << "A/B artifact " << b_path << " does not exist!";
             return false;
         }
         if (!S_ISREG(s.st_mode)) {
