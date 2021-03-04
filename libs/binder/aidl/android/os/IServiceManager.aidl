@@ -18,6 +18,7 @@ package android.os;
 
 import android.os.IClientCallback;
 import android.os.IServiceCallback;
+import android.os.ServiceDebugInfo;
 
 /**
  * Basic interface for finding and publishing system services.
@@ -42,9 +43,9 @@ interface IServiceManager {
      */
     const int DUMP_FLAG_PRIORITY_DEFAULT = 1 << 3;
 
-    const int DUMP_FLAG_PRIORITY_ALL = 15;
-             // DUMP_FLAG_PRIORITY_CRITICAL | DUMP_FLAG_PRIORITY_HIGH
-             // | DUMP_FLAG_PRIORITY_NORMAL | DUMP_FLAG_PRIORITY_DEFAULT;
+    const int DUMP_FLAG_PRIORITY_ALL =
+             DUMP_FLAG_PRIORITY_CRITICAL | DUMP_FLAG_PRIORITY_HIGH
+             | DUMP_FLAG_PRIORITY_NORMAL | DUMP_FLAG_PRIORITY_DEFAULT;
 
     /* Allows services to dump sections in protobuf format. */
     const int DUMP_FLAG_PROTO = 1 << 4;
@@ -116,4 +117,9 @@ interface IServiceManager {
      * Attempt to unregister and remove a service. Will fail if the service is still in use.
      */
     void tryUnregisterService(@utf8InCpp String name, IBinder service);
+
+    /**
+     * Get debug information for all currently registered services.
+     */
+    ServiceDebugInfo[] getServiceDebugInfo();
 }
