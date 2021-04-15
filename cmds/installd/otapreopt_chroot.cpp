@@ -20,20 +20,18 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 
+#include <array>
 #include <fstream>
 #include <sstream>
 
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/macros.h>
+#include <android-base/scopeguard.h>
 #include <android-base/stringprintf.h>
 #include <android-base/unique_fd.h>
 #include <libdm/dm.h>
 #include <selinux/android.h>
-
-#include <apex_file_repository.h>
-#include <apex_constants.h>
-#include <apexd.h>
 
 #include "installd_constants.h"
 #include "otapreopt_utils.h"
@@ -64,47 +62,23 @@ static void CloseDescriptor(const char* descriptor_string) {
     }
 }
 
-static std::vector<apex::ApexFile> ActivateApexPackages() {
-    // The logic here is (partially) copied and adapted from
-    // system/apex/apexd/apexd.cpp.
-    //
-    // Only scan the APEX directory under /system, /system_ext and /vendor (within the chroot dir).
-    std::vector<std::string> apex_dirs{apex::kApexPackageSystemDir, apex::kApexPackageSystemExtDir,
-                                       apex::kApexPackageVendorDir};
-    // Initialize ApexFileRepository used internally in ScanPackagesDirAndActivate.
-    // This is a quick fix to fix apex activation in otapreopt_chroot.
-    apex::ApexFileRepository::GetInstance().AddPreInstalledApex(apex_dirs);
-    for (const auto& dir : apex_dirs) {
-        // Cast call to void to suppress warn_unused_result.
-        static_cast<void>(apex::ScanPackagesDirAndActivate(dir.c_str()));
+static void ActivateApexPackages() {
+    std::vector<std::string> apexd_cmd{"/system/bin/apexd", "--otachroot-bootstrap"};
+    std::string apexd_error_msg;
+
+    bool exec_result = Exec(apexd_cmd, &apexd_error_msg);
+    if (!exec_result) {
+        PLOG(ERROR) << "Running otapreopt failed: " << apexd_error_msg;
+        exit(220);
     }
-    return apex::GetActivePackages();
 }
 
-static void CreateApexInfoList(const std::vector<apex::ApexFile>& apex_files) {
-    // Setup the apex-info-list.xml file
-    const std::string apex_info_file = std::string(apex::kApexRoot) + "/" + apex::kApexInfoList;
-    std::fstream xml(apex_info_file.c_str(), std::ios::out | std::ios::trunc);
-    if (!xml.is_open()) {
-        PLOG(ERROR) << "Failed to open " << apex_info_file;
-        exit(216);
-    }
-
-    // we do not care about inactive apexs
-    std::vector<apex::ApexFile> inactive;
-    apex::CollectApexInfoList(xml, apex_files, inactive);
-    xml.flush();
-    xml.close();
-}
-
-static void DeactivateApexPackages(const std::vector<apex::ApexFile>& active_packages) {
-    for (const apex::ApexFile& apex_file : active_packages) {
-        const std::string& package_path = apex_file.GetPath();
-        base::Result<void> status = apex::DeactivatePackage(package_path);
-        if (!status.ok()) {
-            LOG(ERROR) << "Failed to deactivate " << package_path << ": "
-                       << status.error();
-        }
+static void DeactivateApexPackages() {
+    std::vector<std::string> apexd_cmd{"/system/bin/apexd", "--unmount-all"};
+    std::string apexd_error_msg;
+    bool exec_result = Exec(apexd_cmd, &apexd_error_msg);
+    if (!exec_result) {
+        PLOG(ERROR) << "Running /system/bin/apexd --unmount-all failed: " << apexd_error_msg;
     }
 }
 
@@ -267,26 +241,56 @@ static int otapreopt_chroot(const int argc, char **arg) {
         exit(205);
     }
 
+    // Call apexd --unmount-all to free up loop and dm block devices, so that we can re-use
+    // them during the next invocation. Since otapreopt_chroot calls exit in case something goes
+    // wrong we need to register our own atexit handler.
+    // We want to register this handler before actually activating apex packages. This is mostly
+    // due to the fact that if fail to unmount apexes, then on the next run of otapreopt_chroot
+    // we will ask for new loop devices instead of re-using existing ones, and we really don't want
+    // to do that. :)
+    if (atexit(DeactivateApexPackages) != 0) {
+        LOG(ERROR) << "Failed to register atexit hander";
+        exit(206);
+    }
+
     // Try to mount APEX packages in "/apex" in the chroot dir. We need at least
     // the ART APEX, as it is required by otapreopt to run dex2oat.
-    std::vector<apex::ApexFile> active_packages = ActivateApexPackages();
-    CreateApexInfoList(active_packages);
+    ActivateApexPackages();
 
+    auto cleanup = android::base::make_scope_guard([](){
+        std::vector<std::string> apexd_cmd{"/system/bin/apexd", "--unmount-all"};
+        std::string apexd_error_msg;
+        bool exec_result = Exec(apexd_cmd, &apexd_error_msg);
+        if (!exec_result) {
+            PLOG(ERROR) << "Running /system/bin/apexd --unmount-all failed: " << apexd_error_msg;
+        }
+    });
     // Check that an ART APEX has been activated; clean up and exit
     // early otherwise.
     static constexpr const std::string_view kRequiredApexs[] = {
       "com.android.art",
       "com.android.runtime",
     };
-    for (std::string_view apex : kRequiredApexs) {
-        if (std::none_of(active_packages.begin(), active_packages.end(),
-                         [&](const apex::ApexFile& package) {
-                             return package.GetManifest().name() == apex;
-                         })) {
-            LOG(FATAL_WITHOUT_ABORT) << "No activated " << apex << " APEX package.";
-            DeactivateApexPackages(active_packages);
-            exit(217);
+    std::array<bool, arraysize(kRequiredApexs)> found_apexs{ false, false };
+    DIR* apex_dir = opendir("/apex");
+    if (apex_dir == nullptr) {
+        PLOG(ERROR) << "unable to open /apex";
+        exit(220);
+    }
+    for (dirent* entry = readdir(apex_dir); entry != nullptr; entry = readdir(apex_dir)) {
+        for (int i = 0; i < found_apexs.size(); i++) {
+            if (kRequiredApexs[i] == std::string_view(entry->d_name)) {
+                found_apexs[i] = true;
+                break;
+            }
         }
+    }
+    closedir(apex_dir);
+    auto it = std::find(found_apexs.cbegin(), found_apexs.cend(), false);
+    if (it != found_apexs.cend()) {
+        LOG(ERROR) << "No activated " << kRequiredApexs[std::distance(found_apexs.cbegin(), it)]
+                   << " package!";
+        exit(221);
     }
 
     // Setup /linkerconfig. Doing it after the chroot means it doesn't need its own category
@@ -322,9 +326,6 @@ static int otapreopt_chroot(const int argc, char **arg) {
     if (!exec_result) {
         LOG(ERROR) << "Running otapreopt failed: " << error_msg;
     }
-
-    // Tear down the work down by the apexd logic. (i.e. deactivate packages).
-    DeactivateApexPackages(active_packages);
 
     if (!exec_result) {
         exit(213);

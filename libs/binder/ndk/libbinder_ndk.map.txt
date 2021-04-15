@@ -117,6 +117,7 @@ LIBBINDER_NDK31 { # introduced=31
     ABinderProcess_setupPolling; # apex
     AIBinder_getCallingSid; # apex
     AIBinder_setRequestingSid; # apex
+    AParcel_markSensitive; # llndk
     AServiceManager_isDeclared; # apex llndk
     AServiceManager_forEachDeclaredInstance; # apex llndk
     AServiceManager_registerLazyService; # llndk
@@ -125,6 +126,9 @@ LIBBINDER_NDK31 { # introduced=31
     AServiceManager_setActiveServicesCallback; # llndk
     AServiceManager_tryUnregister; # llndk
     AServiceManager_reRegister; # llndk
+
+    AIBinder_forceDowngradeToSystemStability; # apex
+    AIBinder_forceDowngradeToVendorStability; # llndk
 
     AIBinder_Class_getDescriptor;
     AIBinder_Weak_clone;
@@ -139,7 +143,6 @@ LIBBINDER_NDK31 { # introduced=31
 LIBBINDER_NDK_PLATFORM {
   global:
     AParcel_getAllowFds;
-    AParcel_markSensitive;
     extern "C++" {
         AIBinder_fromPlatformBinder*;
         AIBinder_toPlatformBinder*;

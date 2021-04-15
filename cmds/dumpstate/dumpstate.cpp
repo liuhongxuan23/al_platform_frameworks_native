@@ -2174,14 +2174,13 @@ void Dumpstate::DumpstateBoard(int out_fd) {
     }
 
     /*
-     * mount debugfs for non-user builds which launch with S and unmount it
-     * after invoking dumpstateBoard_* methods. This is to enable debug builds
-     * to not have debugfs mounted during runtime. It will also ensure that
-     * debugfs is only accessed by the dumpstate HAL.
+     * mount debugfs for non-user builds with ro.product.enforce_debugfs_restrictions
+     * set to true and unmount it after invoking dumpstateBoard_* methods.
+     * This is to enable debug builds to not have debugfs mounted during runtime.
+     * It will also ensure that debugfs is only accessed by the dumpstate HAL.
      */
-    auto api_level = android::base::GetIntProperty("ro.product.first_api_level", 0);
-    bool mount_debugfs = !PropertiesHelper::IsUserBuild() && api_level >= 31;
-
+    auto mount_debugfs =
+        android::base::GetBoolProperty("ro.product.enforce_debugfs_restrictions", false);
     if (mount_debugfs) {
         RunCommand("mount debugfs", {"mount", "-t", "debugfs", "debugfs", "/sys/kernel/debug"},
                    AS_ROOT_20);
@@ -2289,7 +2288,10 @@ void Dumpstate::DumpstateBoard(int out_fd) {
     }
 
     if (mount_debugfs) {
-        RunCommand("unmount debugfs", {"umount", "/sys/kernel/debug"}, AS_ROOT_20);
+        auto keep_debugfs_mounted =
+            android::base::GetProperty("persist.dbg.keep_debugfs_mounted", "");
+        if (keep_debugfs_mounted.empty())
+            RunCommand("unmount debugfs", {"umount", "/sys/kernel/debug"}, AS_ROOT_20);
     }
 
     auto file_sizes = std::make_unique<ssize_t[]>(paths.size());
@@ -3024,11 +3026,14 @@ void Dumpstate::MaybeSnapshotSystemTrace() {
 }
 
 void Dumpstate::MaybeSnapshotWinTrace() {
-    RunCommand(
-        // Empty name because it's not intended to be classified as a bugreport section.
-        // Actual tracing files can be found in "/data/misc/wmtrace/" in the bugreport.
-        "", {"cmd", "window", "tracing", "save-for-bugreport"},
-        CommandOptions::WithTimeout(10).Always().DropRoot().RedirectStderr().Build());
+    // Currently WindowManagerService and InputMethodManagerSerivice support WinScope protocol.
+    for (const auto& service : {"window", "input_method"}) {
+        RunCommand(
+            // Empty name because it's not intended to be classified as a bugreport section.
+            // Actual tracing files can be found in "/data/misc/wmtrace/" in the bugreport.
+            "", {"cmd", service, "tracing", "save-for-bugreport"},
+            CommandOptions::WithTimeout(10).Always().DropRoot().RedirectStderr().Build());
+    }
 }
 
 void Dumpstate::onUiIntensiveBugreportDumpsFinished(int32_t calling_uid) {
