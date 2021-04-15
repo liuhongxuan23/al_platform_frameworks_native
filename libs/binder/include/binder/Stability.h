@@ -49,10 +49,42 @@ namespace internal {
 // that it knows how to process. The summary of stability of a binder is
 // represented by a Stability::Category object.
 
-// WARNING: These APIs are only ever expected to be called by auto-generated code.
-//     Instead of calling them, you should set the stability of a .aidl interface
 class Stability final {
 public:
+    // Given a binder interface at a certain stability, there may be some
+    // requirements associated with that higher stability level. For instance, a
+    // VINTF stability binder is required to be in the VINTF manifest. This API
+    // can be called to use that same interface within the local partition.
+    static void forceDowngradeToLocalStability(const sp<IBinder>& binder);
+
+    // WARNING: Below APIs are only ever expected to be called by auto-generated code.
+    //     Instead of calling them, you should set the stability of a .aidl interface
+
+    // WARNING: The only client of
+    //      - forceDowngradeToSystemStability() and;
+    //      - korceDowngradeToVendorStability()
+    //  should be AIBinder_forceDowngradeToLocalStability().
+    //
+    // getLocalLevel() in libbinder returns Level::SYSTEM when called
+    // from libbinder_ndk (even on vendor partition). So we explicitly provide
+    // these methods for use by the NDK API:
+    //      AIBinder_forceDowngradeToLocalStability().
+    //
+    // This allows correctly downgrading the binder's stability to either system/vendor,
+    // depending on the partition.
+
+    // Given a binder interface at a certain stability, there may be some
+    // requirements associated with that higher stability level. For instance, a
+    // VINTF stability binder is required to be in the VINTF manifest. This API
+    // can be called to use that same interface within the vendor partition.
+    static void forceDowngradeToVendorStability(const sp<IBinder>& binder);
+
+    // Given a binder interface at a certain stability, there may be some
+    // requirements associated with that higher stability level. For instance, a
+    // VINTF stability binder is required to be in the VINTF manifest. This API
+    // can be called to use that same interface within the system partition.
+    static void forceDowngradeToSystemStability(const sp<IBinder>& binder);
+
     // WARNING: This is only ever expected to be called by auto-generated code. You likely want to
     // change or modify the stability class of the interface you are using.
     // This must be called as soon as the binder in question is constructed. No thread safety
@@ -139,9 +171,17 @@ private:
     // returns the stability according to how this was built
     static Level getLocalLevel();
 
+    // Downgrades binder stability to the specified level.
+    static void forceDowngradeToStability(const sp<IBinder>& binder, Level level);
+
+    enum {
+      REPR_NONE = 0,
+      REPR_LOG = 1,
+      REPR_ALLOW_DOWNGRADE = 2,
+    };
     // applies stability to binder if stability level is known
     __attribute__((warn_unused_result))
-    static status_t setRepr(IBinder* binder, int32_t representation, bool log);
+    static status_t setRepr(IBinder* binder, int32_t representation, uint32_t flags);
 
     // get stability information as encoded on the wire
     static Category getCategory(IBinder* binder);

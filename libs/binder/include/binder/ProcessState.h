@@ -88,7 +88,8 @@ private:
     static  sp<ProcessState>    init(const char *defaultDriver, bool requireDefault);
 
     friend class IPCThreadState;
-    
+    friend class sp<ProcessState>;
+
             explicit            ProcessState(const char* driver);
                                 ~ProcessState();
 
@@ -124,7 +125,6 @@ private:
 
             Vector<handle_entry>mHandleToObject;
 
-            String8             mRootDir;
             bool                mThreadPoolStarted;
     volatile int32_t            mThreadPoolSeq;
 

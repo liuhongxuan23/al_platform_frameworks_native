@@ -105,7 +105,7 @@ sp<ProcessState> ProcessState::init(const char *driver, bool requireDefault)
         }
 
         std::lock_guard<std::mutex> l(gProcessMutex);
-        gProcess = new ProcessState(driver);
+        gProcess = sp<ProcessState>::make(driver);
     });
 
     if (requireDefault) {
@@ -205,10 +205,12 @@ ssize_t ProcessState::getKernelReferences(size_t buf_count, uintptr_t* buf)
 //
 // Returns -1 in case of failure, otherwise the strong reference count.
 ssize_t ProcessState::getStrongRefCountForNode(const sp<BpBinder>& binder) {
+    if (binder->isRpcBinder()) return -1;
+
     binder_node_info_for_ref info;
     memset(&info, 0, sizeof(binder_node_info_for_ref));
 
-    info.handle = binder->getPrivateAccessorForHandle().handle();
+    info.handle = binder->getPrivateAccessorForId().binderHandle();
 
     status_t result = ioctl(mDriverFD, BINDER_GET_NODE_INFO_FOR_REF, &info);
 
@@ -297,8 +299,8 @@ sp<IBinder> ProcessState::getStrongProxyForHandle(int32_t handle)
                    return nullptr;
             }
 
-            b = BpBinder::create(handle);
-            e->binder = b;
+            sp<BpBinder> b = BpBinder::create(handle);
+            e->binder = b.get();
             if (b) e->refs = b->getWeakRefs();
             result = b;
         } else {
@@ -338,7 +340,7 @@ void ProcessState::spawnPooledThread(bool isMain)
     if (mThreadPoolStarted) {
         String8 name = makeBinderThreadName();
         ALOGV("Spawning new pooled thread, name=%s\n", name.string());
-        sp<Thread> t = new PoolThread(isMain);
+        sp<Thread> t = sp<PoolThread>::make(isMain);
         t->run(name.string());
     }
 }
