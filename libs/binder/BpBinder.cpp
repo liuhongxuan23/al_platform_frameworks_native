@@ -40,6 +40,9 @@ std::atomic_bool BpBinder::sCountByUidEnabled(false);
 binder_proxy_limit_callback BpBinder::sLimitCallback;
 bool BpBinder::sBinderProxyThrottleCreate = false;
 
+extern bool libbinder_test_enable;
+bool libbinder_test_enable = false;
+
 // Arbitrarily high value that probably distinguishes a bad behaving app
 uint32_t BpBinder::sBinderProxyCountHighWatermark = 2500;
 // Another arbitrary value a binder count needs to drop below before another callback will be called
@@ -209,6 +212,10 @@ status_t BpBinder::dump(int fd, const Vector<String16>& args)
 status_t BpBinder::transact(
     uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)
 {
+    if (libbinder_test_enable && code != INTERFACE_TRANSACTION) {
+        ALOG(LOG_INFO, "test_binder", "%s %u", String8(getInterfaceDescriptor()).string(), code);
+    }
+
     // Once a binder has died, it will never come back to life.
     if (mAlive) {
         status_t status = IPCThreadState::self()->transact(
