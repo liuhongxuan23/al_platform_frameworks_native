@@ -793,6 +793,9 @@ void Dumpstate::PrintHeader() const {
     if (module_metadata_version != 0) {
         printf("Module Metadata version: %" PRId64 "\n", module_metadata_version);
     }
+    printf("SDK extension versions [r=%s s=%s]\n",
+           android::base::GetProperty("build.version.extensions.r", "-").c_str(),
+           android::base::GetProperty("build.version.extensions.s", "-").c_str());
 
     printf("Kernel: ");
     DumpFileToFd(STDOUT_FILENO, "", "/proc/version");
@@ -1637,6 +1640,10 @@ static Dumpstate::RunStatus dumpstate() {
         MYLOGD("Skipping 'lsmod' because /proc/modules does not exist\n");
     } else {
         RunCommand("LSMOD", {"lsmod"});
+        RunCommand("MODULES INFO",
+                   {"sh", "-c", "cat /proc/modules | cut -d' ' -f1 | "
+                    "    while read MOD ; do echo modinfo:$MOD ; modinfo $MOD ; "
+                    "done"}, CommandOptions::AS_ROOT);
     }
 
     if (android::base::GetBoolProperty("ro.logd.kernel", false)) {
@@ -1687,6 +1694,12 @@ static Dumpstate::RunStatus dumpstate() {
     RunCommand("MULTICAST ADDRESSES", {"ip", "maddr"});
 
     RUN_SLOW_FUNCTION_WITH_CONSENT_CHECK(RunDumpsysHigh);
+
+    // The dump mechanism in connectivity is refactored due to modularization work. Connectivity can
+    // only register with a default priority(NORMAL priority). Dumpstate has to call connectivity
+    // dump with priority parameters to dump high priority information.
+    RunDumpsys("SERVICE HIGH connectivity", {"connectivity", "--dump-priority", "HIGH"},
+                   CommandOptions::WithTimeout(10).Build());
 
     RunCommand("SYSTEM PROPERTIES", {"getprop"});
 
@@ -1956,6 +1969,8 @@ static void DumpstateTelephonyOnly(const std::string& calling_package) {
 
     RunDumpsys("DUMPSYS", {"connectivity"}, CommandOptions::WithTimeout(90).Build(),
                SEC_TO_MSEC(10));
+    RunDumpsys("DUMPSYS", {"vcn_management"}, CommandOptions::WithTimeout(90).Build(),
+               SEC_TO_MSEC(10));
     if (include_sensitive_info) {
         // Carrier apps' services will be dumped below in dumpsys activity service all-non-platform.
         RunDumpsys("DUMPSYS", {"carrier_config"}, CommandOptions::WithTimeout(90).Build(),
@@ -2174,13 +2189,13 @@ void Dumpstate::DumpstateBoard(int out_fd) {
     }
 
     /*
-     * mount debugfs for non-user builds with ro.product.enforce_debugfs_restrictions
+     * mount debugfs for non-user builds with ro.product.debugfs_restrictions.enabled
      * set to true and unmount it after invoking dumpstateBoard_* methods.
      * This is to enable debug builds to not have debugfs mounted during runtime.
      * It will also ensure that debugfs is only accessed by the dumpstate HAL.
      */
     auto mount_debugfs =
-        android::base::GetBoolProperty("ro.product.enforce_debugfs_restrictions", false);
+        android::base::GetBoolProperty("ro.product.debugfs_restrictions.enabled", false);
     if (mount_debugfs) {
         RunCommand("mount debugfs", {"mount", "-t", "debugfs", "debugfs", "/sys/kernel/debug"},
                    AS_ROOT_20);

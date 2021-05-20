@@ -18,7 +18,9 @@
 
 #include "RpcState.h"
 
+#include <android-base/scopeguard.h>
 #include <binder/BpBinder.h>
+#include <binder/IPCThreadState.h>
 #include <binder/RpcServer.h>
 
 #include "Debug.h"
@@ -28,19 +30,21 @@
 
 namespace android {
 
+using base::ScopeGuard;
+
 RpcState::RpcState() {}
 RpcState::~RpcState() {}
 
-status_t RpcState::onBinderLeaving(const sp<RpcConnection>& connection, const sp<IBinder>& binder,
+status_t RpcState::onBinderLeaving(const sp<RpcSession>& session, const sp<IBinder>& binder,
                                    RpcAddress* outAddress) {
     bool isRemote = binder->remoteBinder();
     bool isRpc = isRemote && binder->remoteBinder()->isRpcBinder();
 
-    if (isRpc && binder->remoteBinder()->getPrivateAccessorForId().rpcConnection() != connection) {
+    if (isRpc && binder->remoteBinder()->getPrivateAccessorForId().rpcSession() != session) {
         // We need to be able to send instructions over the socket for how to
         // connect to a different server, and we also need to let the host
         // process know that this is happening.
-        ALOGE("Canot send binder from unrelated binder RPC connection.");
+        ALOGE("Cannot send binder from unrelated binder RPC session.");
         return INVALID_OPERATION;
     }
 
@@ -91,8 +95,7 @@ status_t RpcState::onBinderLeaving(const sp<RpcConnection>& connection, const sp
     return OK;
 }
 
-sp<IBinder> RpcState::onBinderEntering(const sp<RpcConnection>& connection,
-                                       const RpcAddress& address) {
+sp<IBinder> RpcState::onBinderEntering(const sp<RpcSession>& session, const RpcAddress& address) {
     std::unique_lock<std::mutex> _l(mNodeMutex);
 
     if (auto it = mNodeForAddress.find(address); it != mNodeForAddress.end()) {
@@ -106,7 +109,7 @@ sp<IBinder> RpcState::onBinderEntering(const sp<RpcConnection>& connection,
         // We have timesRecd RPC refcounts, but we only need to hold on to one
         // when we keep the object. All additional dec strongs are sent
         // immediately, we wait to send the last one in BpBinder::onLastDecStrong.
-        (void)connection->sendDecStrong(address);
+        (void)session->sendDecStrong(address);
 
         return binder;
     }
@@ -114,9 +117,9 @@ sp<IBinder> RpcState::onBinderEntering(const sp<RpcConnection>& connection,
     auto&& [it, inserted] = mNodeForAddress.insert({address, BinderNode{}});
     LOG_ALWAYS_FATAL_IF(!inserted, "Failed to insert binder when creating proxy");
 
-    // Currently, all binders are assumed to be part of the same connection (no
+    // Currently, all binders are assumed to be part of the same session (no
     // device global binders in the RPC world).
-    sp<IBinder> binder = BpBinder::create(connection, it->first);
+    sp<IBinder> binder = BpBinder::create(session, it->first);
     it->second.binder = binder;
     it->second.timesRecd = 1;
     return binder;
@@ -183,6 +186,27 @@ void RpcState::terminate() {
     }
 }
 
+RpcState::CommandData::CommandData(size_t size) : mSize(size) {
+    // The maximum size for regular binder is 1MB for all concurrent
+    // transactions. A very small proportion of transactions are even
+    // larger than a page, but we need to avoid allocating too much
+    // data on behalf of an arbitrary client, or we could risk being in
+    // a position where a single additional allocation could run out of
+    // memory.
+    //
+    // Note, this limit may not reflect the total amount of data allocated for a
+    // transaction (in some cases, additional fixed size amounts are added),
+    // though for rough consistency, we should avoid cases where this data type
+    // is used for multiple dynamic allocations for a single transaction.
+    constexpr size_t kMaxTransactionAllocation = 100 * 1000;
+    if (size == 0) return;
+    if (size > kMaxTransactionAllocation) {
+        ALOGW("Transaction requested too much data allocation %zu", size);
+        return;
+    }
+    mData.reset(new (std::nothrow) uint8_t[size]);
+}
+
 bool RpcState::rpcSend(const base::unique_fd& fd, const char* what, const void* data, size_t size) {
     LOG_RPC_DETAIL("Sending %s on fd %d: %s", what, fd.get(), hexString(data, size).c_str());
 
@@ -232,14 +256,13 @@ bool RpcState::rpcRec(const base::unique_fd& fd, const char* what, void* data, s
     return true;
 }
 
-sp<IBinder> RpcState::getRootObject(const base::unique_fd& fd,
-                                    const sp<RpcConnection>& connection) {
+sp<IBinder> RpcState::getRootObject(const base::unique_fd& fd, const sp<RpcSession>& session) {
     Parcel data;
-    data.markForRpc(connection);
+    data.markForRpc(session);
     Parcel reply;
 
-    status_t status = transact(fd, RpcAddress::zero(), RPC_SPECIAL_TRANSACT_GET_ROOT, data,
-                               connection, &reply, 0);
+    status_t status = transact(fd, RpcAddress::zero(), RPC_SPECIAL_TRANSACT_GET_ROOT, data, session,
+                               &reply, 0);
     if (status != OK) {
         ALOGE("Error getting root object: %s", statusToString(status).c_str());
         return nullptr;
@@ -248,8 +271,54 @@ sp<IBinder> RpcState::getRootObject(const base::unique_fd& fd,
     return reply.readStrongBinder();
 }
 
+status_t RpcState::getMaxThreads(const base::unique_fd& fd, const sp<RpcSession>& session,
+                                 size_t* maxThreadsOut) {
+    Parcel data;
+    data.markForRpc(session);
+    Parcel reply;
+
+    status_t status = transact(fd, RpcAddress::zero(), RPC_SPECIAL_TRANSACT_GET_MAX_THREADS, data,
+                               session, &reply, 0);
+    if (status != OK) {
+        ALOGE("Error getting max threads: %s", statusToString(status).c_str());
+        return status;
+    }
+
+    int32_t maxThreads;
+    status = reply.readInt32(&maxThreads);
+    if (status != OK) return status;
+    if (maxThreads <= 0) {
+        ALOGE("Error invalid max maxThreads: %d", maxThreads);
+        return BAD_VALUE;
+    }
+
+    *maxThreadsOut = maxThreads;
+    return OK;
+}
+
+status_t RpcState::getSessionId(const base::unique_fd& fd, const sp<RpcSession>& session,
+                                int32_t* sessionIdOut) {
+    Parcel data;
+    data.markForRpc(session);
+    Parcel reply;
+
+    status_t status = transact(fd, RpcAddress::zero(), RPC_SPECIAL_TRANSACT_GET_SESSION_ID, data,
+                               session, &reply, 0);
+    if (status != OK) {
+        ALOGE("Error getting session ID: %s", statusToString(status).c_str());
+        return status;
+    }
+
+    int32_t sessionId;
+    status = reply.readInt32(&sessionId);
+    if (status != OK) return status;
+
+    *sessionIdOut = sessionId;
+    return OK;
+}
+
 status_t RpcState::transact(const base::unique_fd& fd, const RpcAddress& address, uint32_t code,
-                            const Parcel& data, const sp<RpcConnection>& connection, Parcel* reply,
+                            const Parcel& data, const sp<RpcSession>& session, Parcel* reply,
                             uint32_t flags) {
     uint64_t asyncNumber = 0;
 
@@ -282,7 +351,11 @@ status_t RpcState::transact(const base::unique_fd& fd, const RpcAddress& address
             .asyncNumber = asyncNumber,
     };
 
-    std::vector<uint8_t> transactionData(sizeof(RpcWireTransaction) + data.dataSize());
+    CommandData transactionData(sizeof(RpcWireTransaction) + data.dataSize());
+    if (!transactionData.valid()) {
+        return NO_MEMORY;
+    }
+
     memcpy(transactionData.data() + 0, &transaction, sizeof(RpcWireTransaction));
     memcpy(transactionData.data() + sizeof(RpcWireTransaction), data.data(), data.dataSize());
 
@@ -309,7 +382,7 @@ status_t RpcState::transact(const base::unique_fd& fd, const RpcAddress& address
 
     LOG_ALWAYS_FATAL_IF(reply == nullptr, "Reply parcel must be used for synchronous transaction.");
 
-    return waitForReply(fd, connection, reply);
+    return waitForReply(fd, session, reply);
 }
 
 static void cleanup_reply_data(Parcel* p, const uint8_t* data, size_t dataSize,
@@ -321,7 +394,7 @@ static void cleanup_reply_data(Parcel* p, const uint8_t* data, size_t dataSize,
     LOG_ALWAYS_FATAL_IF(objectsCount, 0);
 }
 
-status_t RpcState::waitForReply(const base::unique_fd& fd, const sp<RpcConnection>& connection,
+status_t RpcState::waitForReply(const base::unique_fd& fd, const sp<RpcSession>& session,
                                 Parcel* reply) {
     RpcWireHeader command;
     while (true) {
@@ -331,13 +404,16 @@ status_t RpcState::waitForReply(const base::unique_fd& fd, const sp<RpcConnectio
 
         if (command.command == RPC_COMMAND_REPLY) break;
 
-        status_t status = processServerCommand(fd, connection, command);
+        status_t status = processServerCommand(fd, session, command);
         if (status != OK) return status;
     }
 
-    uint8_t* data = new uint8_t[command.bodySize];
+    CommandData data(command.bodySize);
+    if (!data.valid()) {
+        return NO_MEMORY;
+    }
 
-    if (!rpcRec(fd, "reply body", data, command.bodySize)) {
+    if (!rpcRec(fd, "reply body", data.data(), command.bodySize)) {
         return DEAD_OBJECT;
     }
 
@@ -347,13 +423,14 @@ status_t RpcState::waitForReply(const base::unique_fd& fd, const sp<RpcConnectio
         terminate();
         return BAD_VALUE;
     }
-    RpcWireReply* rpcReply = reinterpret_cast<RpcWireReply*>(data);
+    RpcWireReply* rpcReply = reinterpret_cast<RpcWireReply*>(data.data());
     if (rpcReply->status != OK) return rpcReply->status;
 
+    data.release();
     reply->ipcSetDataReference(rpcReply->data, command.bodySize - offsetof(RpcWireReply, data),
                                nullptr, 0, cleanup_reply_data);
 
-    reply->markForRpc(connection);
+    reply->markForRpc(session);
 
     return OK;
 }
@@ -384,8 +461,7 @@ status_t RpcState::sendDecStrong(const base::unique_fd& fd, const RpcAddress& ad
     return OK;
 }
 
-status_t RpcState::getAndExecuteCommand(const base::unique_fd& fd,
-                                        const sp<RpcConnection>& connection) {
+status_t RpcState::getAndExecuteCommand(const base::unique_fd& fd, const sp<RpcSession>& session) {
     LOG_RPC_DETAIL("getAndExecuteCommand on fd %d", fd.get());
 
     RpcWireHeader command;
@@ -393,15 +469,29 @@ status_t RpcState::getAndExecuteCommand(const base::unique_fd& fd,
         return DEAD_OBJECT;
     }
 
-    return processServerCommand(fd, connection, command);
+    return processServerCommand(fd, session, command);
 }
 
-status_t RpcState::processServerCommand(const base::unique_fd& fd,
-                                        const sp<RpcConnection>& connection,
+status_t RpcState::processServerCommand(const base::unique_fd& fd, const sp<RpcSession>& session,
                                         const RpcWireHeader& command) {
+    IPCThreadState* kernelBinderState = IPCThreadState::selfOrNull();
+    IPCThreadState::SpGuard spGuard{
+            .address = __builtin_frame_address(0),
+            .context = "processing binder RPC command",
+    };
+    const IPCThreadState::SpGuard* origGuard;
+    if (kernelBinderState != nullptr) {
+        origGuard = kernelBinderState->pushGetCallingSpGuard(&spGuard);
+    }
+    ScopeGuard guardUnguard = [&]() {
+        if (kernelBinderState != nullptr) {
+            kernelBinderState->restoreGetCallingSpGuard(origGuard);
+        }
+    };
+
     switch (command.command) {
         case RPC_COMMAND_TRANSACT:
-            return processTransact(fd, connection, command);
+            return processTransact(fd, session, command);
         case RPC_COMMAND_DEC_STRONG:
             return processDecStrong(fd, command);
     }
@@ -410,21 +500,24 @@ status_t RpcState::processServerCommand(const base::unique_fd& fd,
     // RPC-binder-level wire protocol is not self synchronizing, we have no way
     // to understand where the current command ends and the next one begins. We
     // also can't consider it a fatal error because this would allow any client
-    // to kill us, so ending the connection for misbehaving client.
-    ALOGE("Unknown RPC command %d - terminating connection", command.command);
+    // to kill us, so ending the session for misbehaving client.
+    ALOGE("Unknown RPC command %d - terminating session", command.command);
     terminate();
     return DEAD_OBJECT;
 }
-status_t RpcState::processTransact(const base::unique_fd& fd, const sp<RpcConnection>& connection,
+status_t RpcState::processTransact(const base::unique_fd& fd, const sp<RpcSession>& session,
                                    const RpcWireHeader& command) {
     LOG_ALWAYS_FATAL_IF(command.command != RPC_COMMAND_TRANSACT, "command: %d", command.command);
 
-    std::vector<uint8_t> transactionData(command.bodySize);
+    CommandData transactionData(command.bodySize);
+    if (!transactionData.valid()) {
+        return NO_MEMORY;
+    }
     if (!rpcRec(fd, "transaction body", transactionData.data(), transactionData.size())) {
         return DEAD_OBJECT;
     }
 
-    return processTransactInternal(fd, connection, std::move(transactionData));
+    return processTransactInternal(fd, session, std::move(transactionData));
 }
 
 static void do_nothing_to_transact_data(Parcel* p, const uint8_t* data, size_t dataSize,
@@ -436,9 +529,8 @@ static void do_nothing_to_transact_data(Parcel* p, const uint8_t* data, size_t d
     (void)objectsCount;
 }
 
-status_t RpcState::processTransactInternal(const base::unique_fd& fd,
-                                           const sp<RpcConnection>& connection,
-                                           std::vector<uint8_t>&& transactionData) {
+status_t RpcState::processTransactInternal(const base::unique_fd& fd, const sp<RpcSession>& session,
+                                           CommandData transactionData) {
     if (transactionData.size() < sizeof(RpcWireTransaction)) {
         ALOGE("Expecting %zu but got %zu bytes for RpcWireTransaction. Terminating!",
               sizeof(RpcWireTransaction), transactionData.size());
@@ -459,7 +551,6 @@ status_t RpcState::processTransactInternal(const base::unique_fd& fd,
         auto it = mNodeForAddress.find(addr);
         if (it == mNodeForAddress.end()) {
             ALOGE("Unknown binder address %s.", addr.toString().c_str());
-            dump();
             replyStatus = BAD_VALUE;
         } else {
             target = it->second.binder.promote();
@@ -469,7 +560,7 @@ status_t RpcState::processTransactInternal(const base::unique_fd& fd,
                 // However, for local binders, it indicates a misbehaving client
                 // (any binder which is being transacted on should be holding a
                 // strong ref count), so in either case, terminating the
-                // connection.
+                // session.
                 ALOGE("While transacting, binder has been deleted at address %s. Terminating!",
                       addr.toString().c_str());
                 terminate();
@@ -498,40 +589,53 @@ status_t RpcState::processTransactInternal(const base::unique_fd& fd,
         }
     }
 
-    Parcel data;
-    // transaction->data is owned by this function. Parcel borrows this data and
-    // only holds onto it for the duration of this function call. Parcel will be
-    // deleted before the 'transactionData' object.
-    data.ipcSetDataReference(transaction->data,
-                             transactionData.size() - offsetof(RpcWireTransaction, data),
-                             nullptr /*object*/, 0 /*objectCount*/, do_nothing_to_transact_data);
-    data.markForRpc(connection);
-
     Parcel reply;
-    reply.markForRpc(connection);
+    reply.markForRpc(session);
 
     if (replyStatus == OK) {
+        Parcel data;
+        // transaction->data is owned by this function. Parcel borrows this data and
+        // only holds onto it for the duration of this function call. Parcel will be
+        // deleted before the 'transactionData' object.
+        data.ipcSetDataReference(transaction->data,
+                                 transactionData.size() - offsetof(RpcWireTransaction, data),
+                                 nullptr /*object*/, 0 /*objectCount*/,
+                                 do_nothing_to_transact_data);
+        data.markForRpc(session);
+
         if (target) {
             replyStatus = target->transact(transaction->code, data, &reply, transaction->flags);
         } else {
             LOG_RPC_DETAIL("Got special transaction %u", transaction->code);
-            // special case for 'zero' address (special server commands)
-            switch (transaction->code) {
-                case RPC_SPECIAL_TRANSACT_GET_ROOT: {
-                    sp<IBinder> root;
-                    sp<RpcServer> server = connection->server().promote();
-                    if (server) {
-                        root = server->getRootObject();
-                    } else {
-                        ALOGE("Root object requested, but no server attached.");
-                    }
 
-                    replyStatus = reply.writeStrongBinder(root);
-                    break;
+            sp<RpcServer> server = session->server().promote();
+            if (server) {
+                // special case for 'zero' address (special server commands)
+                switch (transaction->code) {
+                    case RPC_SPECIAL_TRANSACT_GET_ROOT: {
+                        replyStatus = reply.writeStrongBinder(server->getRootObject());
+                        break;
+                    }
+                    case RPC_SPECIAL_TRANSACT_GET_MAX_THREADS: {
+                        replyStatus = reply.writeInt32(server->getMaxThreads());
+                        break;
+                    }
+                    case RPC_SPECIAL_TRANSACT_GET_SESSION_ID: {
+                        // only sessions w/ services can be the source of a
+                        // session ID (so still guarded by non-null server)
+                        //
+                        // sessions associated with servers must have an ID
+                        // (hence abort)
+                        int32_t id = session->getPrivateAccessorForId().get().value();
+                        replyStatus = reply.writeInt32(id);
+                        break;
+                    }
+                    default: {
+                        replyStatus = UNKNOWN_TRANSACTION;
+                    }
                 }
-                default: {
-                    replyStatus = UNKNOWN_TRANSACTION;
-                }
+            } else {
+                ALOGE("Special command sent, but no server object attached.");
             }
         }
     }
@@ -576,11 +680,11 @@ status_t RpcState::processTransactInternal(const base::unique_fd& fd,
                 // justification for const_cast (consider avoiding priority_queue):
                 // - AsyncTodo operator< doesn't depend on 'data' object
                 // - gotta go fast
-                std::vector<uint8_t> data = std::move(
+                CommandData data = std::move(
                         const_cast<BinderNode::AsyncTodo&>(it->second.asyncTodo.top()).data);
                 it->second.asyncTodo.pop();
                 _l.unlock();
-                return processTransactInternal(fd, connection, std::move(data));
+                return processTransactInternal(fd, session, std::move(data));
             }
         }
         return OK;
@@ -590,7 +694,10 @@ status_t RpcState::processTransactInternal(const base::unique_fd& fd,
             .status = replyStatus,
     };
 
-    std::vector<uint8_t> replyData(sizeof(RpcWireReply) + reply.dataSize());
+    CommandData replyData(sizeof(RpcWireReply) + reply.dataSize());
+    if (!replyData.valid()) {
+        return NO_MEMORY;
+    }
     memcpy(replyData.data() + 0, &rpcReply, sizeof(RpcWireReply));
     memcpy(replyData.data() + sizeof(RpcWireReply), reply.data(), reply.dataSize());
 
@@ -617,7 +724,10 @@ status_t RpcState::processTransactInternal(const base::unique_fd& fd,
 status_t RpcState::processDecStrong(const base::unique_fd& fd, const RpcWireHeader& command) {
     LOG_ALWAYS_FATAL_IF(command.command != RPC_COMMAND_DEC_STRONG, "command: %d", command.command);
 
-    std::vector<uint8_t> commandData(command.bodySize);
+    CommandData commandData(command.bodySize);
+    if (!commandData.valid()) {
+        return NO_MEMORY;
+    }
     if (!rpcRec(fd, "dec ref body", commandData.data(), commandData.size())) {
         return DEAD_OBJECT;
     }
@@ -636,7 +746,6 @@ status_t RpcState::processDecStrong(const base::unique_fd& fd, const RpcWireHead
     auto it = mNodeForAddress.find(addr);
     if (it == mNodeForAddress.end()) {
         ALOGE("Unknown binder address %s for dec strong.", addr.toString().c_str());
-        dump();
         return OK;
     }
 
@@ -669,7 +778,7 @@ status_t RpcState::processDecStrong(const base::unique_fd& fd, const RpcWireHead
     }
 
     _l.unlock();
-    tempHold = nullptr; // destructor may make binder calls on this connection
+    tempHold = nullptr; // destructor may make binder calls on this session
 
     return OK;
 }

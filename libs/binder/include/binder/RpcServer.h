@@ -17,9 +17,12 @@
 
 #include <android-base/unique_fd.h>
 #include <binder/IBinder.h>
-#include <binder/RpcConnection.h>
+#include <binder/RpcSession.h>
 #include <utils/Errors.h>
 #include <utils/RefBase.h>
+
+#include <mutex>
+#include <thread>
 
 // WARNING: This is a feature which is still in development, and it is subject
 // to radical change. Any production use of this may subject your code to any
@@ -27,59 +30,143 @@
 
 namespace android {
 
+class RpcSocketAddress;
+
 /**
  * This represents a server of an interface, which may be connected to by any
  * number of clients over sockets.
  *
- * This object is not (currently) thread safe. All calls to it are expected to
- * happen at process startup.
+ * Usage:
+ *     auto server = RpcServer::make();
+ *     // only supports one now
+ *     if (!server->setup*Server(...)) {
+ *         :(
+ *     }
+ *     server->join();
  */
 class RpcServer final : public virtual RefBase {
 public:
     static sp<RpcServer> make();
 
+    /**
+     * This represents a session for responses, e.g.:
+     *
+     *     process A serves binder a
+     *     process B opens a session to process A
+     *     process B makes binder b and sends it to A
+     *     A uses this 'back session' to send things back to B
+     */
+    [[nodiscard]] bool setupUnixDomainServer(const char* path);
+
+    /**
+     * Creates an RPC server at the current port.
+     */
+    [[nodiscard]] bool setupVsockServer(unsigned int port);
+
+    /**
+     * Creates an RPC server at the current port using IPv4.
+     *
+     * TODO(b/182914638): IPv6 support
+     *
+     * Set |port| to 0 to pick an ephemeral port; see discussion of
+     * /proc/sys/net/ipv4/ip_local_port_range in ip(7). In this case, |assignedPort|
+     * will be set to the picked port number, if it is not null.
+     */
+    [[nodiscard]] bool setupInetServer(unsigned int port, unsigned int* assignedPort);
+
+    /**
+     * If setup*Server has been successful, return true. Otherwise return false.
+     */
+    [[nodiscard]] bool hasServer();
+
+    /**
+     * If hasServer(), return the server FD. Otherwise return invalid FD.
+     */
+    [[nodiscard]] base::unique_fd releaseServer();
+
+    /**
+     * Set up server using an external FD previously set up by releaseServer().
+     * Return false if there's already a server.
+     */
+    bool setupExternalServer(base::unique_fd serverFd);
+
     void iUnderstandThisCodeIsExperimentalAndIWillNotUseItInProduction();
 
     /**
-     * Setup a static connection, when the number of clients are known.
+     * This must be called before adding a client session.
      *
-     * Each call to this function corresponds to a different client, and clients
-     * each have their own threadpools.
+     * If this is not specified, this will be a single-threaded server.
      *
-     * TODO(b/167966510): support dynamic creation of connections/threads
+     * TODO(b/185167543): these are currently created per client, but these
+     * should be shared.
      */
-    sp<RpcConnection> addClientConnection();
-
-    /**
-     * Allowing a server to explicitly drop clients would be easy to add here,
-     * but it is not currently implemented, since users of this functionality
-     * could not use similar functionality if they are running under real
-     * binder.
-     */
-    // void drop(const sp<RpcConnection>& connection);
+    void setMaxThreads(size_t threads);
+    size_t getMaxThreads();
 
     /**
      * The root object can be retrieved by any client, without any
-     * authentication.
+     * authentication. TODO(b/183988761)
+     *
+     * Holds a strong reference to the root object.
      */
     void setRootObject(const sp<IBinder>& binder);
-
     /**
-     * Root object set with setRootObject
+     * Holds a weak reference to the root object.
      */
+    void setRootObjectWeak(const wp<IBinder>& binder);
     sp<IBinder> getRootObject();
 
+    /**
+     * You must have at least one client session before calling this.
+     *
+     * If a client needs to actively terminate join, call shutdown() in a separate thread.
+     *
+     * At any given point, there can only be one thread calling join().
+     */
+    void join();
+
+    /**
+     * Shut down any existing join(). Return true if successfully shut down, false otherwise
+     * (e.g. no join() is running). Will wait for the server to be fully
+     * shutdown.
+     *
+     * TODO(b/185167543): wait for sessions to shutdown as well
+     */
+    [[nodiscard]] bool shutdown();
+
+    /**
+     * For debugging!
+     */
+    std::vector<sp<RpcSession>> listSessions();
+    size_t numUninitializedSessions();
+
     ~RpcServer();
+
+    // internal use only
+
+    void onSessionTerminating(const sp<RpcSession>& session);
 
 private:
     friend sp<RpcServer>;
     RpcServer();
 
+    static void establishConnection(sp<RpcServer>&& server, base::unique_fd clientFd);
+    bool setupSocketServer(const RpcSocketAddress& address);
+    [[nodiscard]] bool acceptOne();
+
     bool mAgreedExperimental = false;
+    size_t mMaxThreads = 1;
+    base::unique_fd mServer; // socket we are accepting sessions on
 
+    std::mutex mLock; // for below
+    std::map<std::thread::id, std::thread> mConnectingThreads;
     sp<IBinder> mRootObject;
-
-    std::vector<sp<RpcConnection>> mConnections; // per-client
+    wp<IBinder> mRootObjectWeak;
+    std::map<int32_t, sp<RpcSession>> mSessions;
+    int32_t mSessionIdCounter = 0;
+    bool mJoinThreadRunning = false;
+    std::unique_ptr<RpcSession::FdTrigger> mShutdownTrigger;
+    std::condition_variable mShutdownCv;
 };
 
 } // namespace android

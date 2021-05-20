@@ -50,7 +50,7 @@ template <typename T> class LightFlattenable;
 class IBinder;
 class IPCThreadState;
 class ProcessState;
-class RpcConnection;
+class RpcSession;
 class String8;
 class TextOutput;
 
@@ -100,6 +100,10 @@ public:
     // the wire binder protocol may change (data is written differently when it
     // is for an RPC transaction).
     void markForBinder(const sp<IBinder>& binder);
+
+    // Whenever possible, markForBinder should be preferred. This method is
+    // called automatically on reply Parcels for RPC transactions.
+    void markForRpc(const sp<RpcSession>& session);
 
     // Whether this Parcel is written for RPC transactions (after calls to
     // markForBinder or markForRpc).
@@ -536,10 +540,6 @@ private:
                                             const binder_size_t* objects, size_t objectsCount,
                                             release_func relFunc);
 
-    // Whenever possible, markForBinder should be preferred. This method is
-    // called automatically on reply Parcels for RPC transactions.
-    void markForRpc(const sp<RpcConnection>& connection);
-
     status_t            finishWrite(size_t len);
     void                releaseObjects();
     void                acquireObjects();
@@ -560,6 +560,8 @@ private:
     status_t            finishUnflattenBinder(const sp<IBinder>& binder, sp<IBinder>* out) const;
     status_t            flattenBinder(const sp<IBinder>& binder);
     status_t            unflattenBinder(sp<IBinder>* out) const;
+
+    status_t readOutVectorSizeWithCheck(size_t elmSize, int32_t* size) const;
 
     template<class T>
     status_t            readAligned(T *pArg) const;
@@ -1136,7 +1138,7 @@ private:
 
     release_func        mOwner;
 
-    sp<RpcConnection> mConnection;
+    sp<RpcSession> mSession;
 
     class Blob {
     public:
@@ -1315,7 +1317,7 @@ status_t Parcel::writeVectorSize(const std::unique_ptr<std::vector<T>>& val) {
 template<typename T>
 status_t Parcel::resizeOutVector(std::vector<T>* val) const {
     int32_t size;
-    status_t err = readInt32(&size);
+    status_t err = readOutVectorSizeWithCheck(sizeof(T), &size);
     if (err != NO_ERROR) {
         return err;
     }
@@ -1330,7 +1332,7 @@ status_t Parcel::resizeOutVector(std::vector<T>* val) const {
 template<typename T>
 status_t Parcel::resizeOutVector(std::optional<std::vector<T>>* val) const {
     int32_t size;
-    status_t err = readInt32(&size);
+    status_t err = readOutVectorSizeWithCheck(sizeof(T), &size);
     if (err != NO_ERROR) {
         return err;
     }
@@ -1346,7 +1348,7 @@ status_t Parcel::resizeOutVector(std::optional<std::vector<T>>* val) const {
 template<typename T>
 status_t Parcel::resizeOutVector(std::unique_ptr<std::vector<T>>* val) const {
     int32_t size;
-    status_t err = readInt32(&size);
+    status_t err = readOutVectorSizeWithCheck(sizeof(T), &size);
     if (err != NO_ERROR) {
         return err;
     }

@@ -150,6 +150,11 @@ typedef void (*AIBinder_Class_onDestroy)(void* userData);
 /**
  * This is called whenever a transaction needs to be processed by a local implementation.
  *
+ * This method will be called after the equivalent of
+ * android.os.Parcel#enforceInterface is called. That is, the interface
+ * descriptor associated with the AIBinder_Class descriptor will already be
+ * checked.
+ *
  * \param binder the object being transacted on.
  * \param code implementation-specific code representing which transaction should be taken.
  * \param in the implementation-specific input data to this transaction.
@@ -173,7 +178,7 @@ typedef binder_status_t (*AIBinder_Class_onTransact)(AIBinder* binder, transacti
  * Available since API level 29.
  *
  * \param interfaceDescriptor this is a unique identifier for the class. This is used internally for
- * sanity checks on transactions.
+ * validity checks on transactions. This should be utf-8.
  * \param onCreate see AIBinder_Class_onCreate.
  * \param onDestroy see AIBinder_Class_onDestroy.
  * \param onTransact see AIBinder_Class_onTransact.
@@ -452,12 +457,14 @@ void* AIBinder_getUserData(AIBinder* binder) __INTRODUCED_IN(29);
  */
 
 /**
- * Creates a parcel to start filling out for a transaction. This may add data to the parcel for
- * security, debugging, or other purposes. This parcel is to be sent via AIBinder_transact and it
- * represents the input data to the transaction. It is recommended to check if the object is local
- * and call directly into its user data before calling this as the parceling and unparceling cost
- * can be avoided. This AIBinder must be either built with a class or associated with a class before
- * using this API.
+ * Creates a parcel to start filling out for a transaction. This will add a header to the
+ * transaction that corresponds to android.os.Parcel#writeInterfaceToken. This may add debugging
+ * or other information to the transaction for platform use or to enable other features to work. The
+ * contents of this header is a platform implementation detail, and it is required to use
+ * libbinder_ndk. This parcel is to be sent via AIBinder_transact and it represents the input data
+ * to the transaction. It is recommended to check if the object is local and call directly into its
+ * user data before calling this as the parceling and unparceling cost can be avoided. This AIBinder
+ * must be either built with a class or associated with a class before using this API.
  *
  * This does not affect the ownership of binder. When this function succeeds, the in parcel's
  * ownership is passed to the caller. At this point, the parcel can be filled out and passed to
@@ -645,7 +652,9 @@ binder_status_t AIBinder_setExtension(AIBinder* binder, AIBinder* ext) __INTRODU
  *
  * \return the class descriptor string. This pointer will never be null; a
  * descriptor is required to define a class. The pointer is owned by the class
- * and will remain valid as long as the class does.
+ * and will remain valid as long as the class does. For a local class, this will
+ * be the same value (not necessarily pointer equal) as is passed into
+ * AIBinder_Class_define. Format is utf-8.
  */
 const char* AIBinder_Class_getDescriptor(const AIBinder_Class* clazz) __INTRODUCED_IN(31);
 
@@ -669,7 +678,7 @@ const char* AIBinder_Class_getDescriptor(const AIBinder_Class* clazz) __INTRODUC
  *
  * \return whether "lhs < rhs" is true
  */
-bool AIBinder_lt(const AIBinder* lhs, const AIBinder* rhs);
+bool AIBinder_lt(const AIBinder* lhs, const AIBinder* rhs) __INTRODUCED_IN(31);
 
 /**
  * Clone an AIBinder_Weak. Useful because even if a weak binder promotes to a
@@ -683,7 +692,7 @@ bool AIBinder_lt(const AIBinder* lhs, const AIBinder* rhs);
  * \return clone of the input parameter. This must be deleted with
  * AIBinder_Weak_delete. Null if weak input parameter is also null.
  */
-AIBinder_Weak* AIBinder_Weak_clone(const AIBinder_Weak* weak);
+AIBinder_Weak* AIBinder_Weak_clone(const AIBinder_Weak* weak) __INTRODUCED_IN(31);
 
 /**
  * Whether AIBinder_Weak is less than another.
@@ -718,7 +727,7 @@ AIBinder_Weak* AIBinder_Weak_clone(const AIBinder_Weak* weak);
  *
  * \return whether "lhs < rhs" is true
  */
-bool AIBinder_Weak_lt(const AIBinder_Weak* lhs, const AIBinder_Weak* rhs);
+bool AIBinder_Weak_lt(const AIBinder_Weak* lhs, const AIBinder_Weak* rhs) __INTRODUCED_IN(31);
 
 __END_DECLS
 

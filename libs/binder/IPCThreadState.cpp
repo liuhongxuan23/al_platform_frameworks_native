@@ -29,8 +29,6 @@
 #include <utils/SystemClock.h>
 #include <utils/threads.h>
 
-#include <private/binder/binder_module.h>
-
 #include <atomic>
 #include <errno.h>
 #include <inttypes.h>
@@ -43,6 +41,7 @@
 #include <unistd.h>
 
 #include "Static.h"
+#include "binder_module.h"
 
 #if LOG_NDEBUG
 
@@ -90,6 +89,8 @@ static const char *kReturnStrings[] = {
     "BR_DEAD_BINDER",
     "BR_CLEAR_DEATH_NOTIFICATION_DONE",
     "BR_FAILED_REPLY",
+    "BR_FROZEN_REPLY",
+    "BR_ONEWAY_SPAM_SUSPECT",
     "BR_TRANSACTION_SEC_CTX",
 };
 
@@ -365,17 +366,44 @@ status_t IPCThreadState::clearLastError()
 
 pid_t IPCThreadState::getCallingPid() const
 {
+    checkContextIsBinderForUse(__func__);
     return mCallingPid;
 }
 
 const char* IPCThreadState::getCallingSid() const
 {
+    checkContextIsBinderForUse(__func__);
     return mCallingSid;
 }
 
 uid_t IPCThreadState::getCallingUid() const
 {
+    checkContextIsBinderForUse(__func__);
     return mCallingUid;
+}
+
+const IPCThreadState::SpGuard* IPCThreadState::pushGetCallingSpGuard(const SpGuard* guard) {
+    const SpGuard* orig = mServingStackPointerGuard;
+    mServingStackPointerGuard = guard;
+    return orig;
+}
+
+void IPCThreadState::restoreGetCallingSpGuard(const SpGuard* guard) {
+    mServingStackPointerGuard = guard;
+}
+
+void IPCThreadState::checkContextIsBinderForUse(const char* use) const {
+    if (LIKELY(mServingStackPointerGuard == nullptr)) return;
+
+    if (!mServingStackPointer || mServingStackPointerGuard->address < mServingStackPointer) {
+        LOG_ALWAYS_FATAL("In context %s, %s does not make sense (binder sp: %p, guard: %p).",
+                         mServingStackPointerGuard->context, use, mServingStackPointer,
+                         mServingStackPointerGuard->address);
+    }
+
+    // in the case mServingStackPointer is deeper in the stack than the guard,
+    // we must be serving a binder transaction (maybe nested). This is a binder
+    // context, so we don't abort
 }
 
 int64_t IPCThreadState::clearCallingIdentity()
@@ -846,15 +874,15 @@ status_t IPCThreadState::clearDeathNotification(int32_t handle, BpBinder* proxy)
 }
 
 IPCThreadState::IPCThreadState()
-    : mProcess(ProcessState::self()),
-      mServingStackPointer(nullptr),
-      mWorkSource(kUnsetWorkSource),
-      mPropagateWorkSource(false),
-      mIsLooper(false),
-      mStrictModePolicy(0),
-      mLastTransactionBinderFlags(0),
-      mCallRestriction(mProcess->mCallRestriction)
-{
+      : mProcess(ProcessState::self()),
+        mServingStackPointer(nullptr),
+        mServingStackPointerGuard(nullptr),
+        mWorkSource(kUnsetWorkSource),
+        mPropagateWorkSource(false),
+        mIsLooper(false),
+        mStrictModePolicy(0),
+        mLastTransactionBinderFlags(0),
+        mCallRestriction(mProcess->mCallRestriction) {
     pthread_setspecific(gTLS, this);
     clearCaller();
     mIn.setDataCapacity(256);
@@ -894,6 +922,11 @@ status_t IPCThreadState::waitForResponse(Parcel *reply, status_t *acquireResult)
         }
 
         switch (cmd) {
+        case BR_ONEWAY_SPAM_SUSPECT:
+            ALOGE("Process seems to be sending too many oneway calls.");
+            CallStack::logStack("oneway spamming", CallStack::getCurrent().get(),
+                    ANDROID_LOG_ERROR);
+            [[fallthrough]];
         case BR_TRANSACTION_COMPLETE:
             if (!reply && !acquireResult) goto finish;
             break;
@@ -1224,7 +1257,7 @@ status_t IPCThreadState::executeCommand(int32_t cmd)
                 tr.offsets_size/sizeof(binder_size_t), freeBuffer);
 
             const void* origServingStackPointer = mServingStackPointer;
-            mServingStackPointer = &origServingStackPointer; // anything on the stack
+            mServingStackPointer = __builtin_frame_address(0);
 
             const pid_t origPid = mCallingPid;
             const char* origSid = mCallingSid;
