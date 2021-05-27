@@ -151,9 +151,11 @@ void RpcServer::join() {
         LOG_ALWAYS_FATAL_IF(mShutdownTrigger == nullptr, "Cannot create join signaler");
     }
 
-    while (mShutdownTrigger->triggerablePollRead(mServer)) {
+    status_t status;
+    while ((status = mShutdownTrigger->triggerablePollRead(mServer)) == OK) {
         (void)acceptOne();
     }
+    LOG_RPC_DETAIL("RpcServer::join exiting with %s", statusToString(status).c_str());
 
     {
         std::lock_guard<std::mutex> _l(mLock);
@@ -190,11 +192,13 @@ bool RpcServer::shutdown() {
     }
 
     mShutdownTrigger->trigger();
-    while (mJoinThreadRunning || !mConnectingThreads.empty()) {
-        ALOGI("Waiting for RpcServer to shut down. Join thread running: %d, Connecting threads: "
-              "%zu",
-              mJoinThreadRunning, mConnectingThreads.size());
-        mShutdownCv.wait(_l);
+    while (mJoinThreadRunning || !mConnectingThreads.empty() || !mSessions.empty()) {
+        if (std::cv_status::timeout == mShutdownCv.wait_for(_l, std::chrono::seconds(1))) {
+            ALOGE("Waiting for RpcServer to shut down (1s w/o progress). Join thread running: %d, "
+                  "Connecting threads: "
+                  "%zu, Sessions: %zu. Is your server deadlocked?",
+                  mJoinThreadRunning, mConnectingThreads.size(), mSessions.size());
+        }
     }
 
     // At this point, we know join() is about to exit, but the thread that calls
@@ -236,9 +240,13 @@ void RpcServer::establishConnection(sp<RpcServer>&& server, base::unique_fd clie
     LOG_ALWAYS_FATAL_IF(server->mShutdownTrigger == nullptr);
 
     int32_t id;
-    bool idValid = server->mShutdownTrigger->interruptableRecv(clientFd.get(), &id, sizeof(id));
+    status_t status =
+            server->mShutdownTrigger->interruptableReadFully(clientFd.get(), &id, sizeof(id));
+    bool idValid = status == OK;
     if (!idValid) {
-        ALOGE("Failed to read ID for client connecting to RPC server.");
+        ALOGE("Failed to read ID for client connecting to RPC server: %s",
+              statusToString(status).c_str());
+        // still need to cleanup before we can return
     }
 
     std::thread thisThread;
@@ -250,18 +258,12 @@ void RpcServer::establishConnection(sp<RpcServer>&& server, base::unique_fd clie
         LOG_ALWAYS_FATAL_IF(threadId == server->mConnectingThreads.end(),
                             "Must establish connection on owned thread");
         thisThread = std::move(threadId->second);
-        ScopeGuard detachGuard = [&]() { thisThread.detach(); };
-        server->mConnectingThreads.erase(threadId);
-
-        // TODO(b/185167543): we currently can't disable this because we don't
-        // shutdown sessions as well, only the server itself. So, we need to
-        // keep this separate from the detachGuard, since we temporarily want to
-        // give a notification even when we pass ownership of the thread to
-        // a session.
-        ScopeGuard threadLifetimeGuard = [&]() {
+        ScopeGuard detachGuard = [&]() {
+            thisThread.detach();
             _l.unlock();
             server->mShutdownCv.notify_all();
         };
+        server->mConnectingThreads.erase(threadId);
 
         if (!idValid) {
             return;
@@ -272,7 +274,8 @@ void RpcServer::establishConnection(sp<RpcServer>&& server, base::unique_fd clie
             server->mSessionIdCounter++;
 
             session = RpcSession::make();
-            session->setForServer(wp<RpcServer>(server), server->mSessionIdCounter);
+            session->setForServer(wp<RpcServer>(server), server->mSessionIdCounter,
+                                  server->mShutdownTrigger);
 
             server->mSessions[server->mSessionIdCounter] = session;
         } else {
@@ -336,6 +339,11 @@ void RpcServer::onSessionTerminating(const sp<RpcSession>& session) {
     LOG_ALWAYS_FATAL_IF(it == mSessions.end(), "Bad state, unknown session id %d", *id);
     LOG_ALWAYS_FATAL_IF(it->second != session, "Bad state, session has id mismatch %d", *id);
     (void)mSessions.erase(it);
+}
+
+void RpcServer::onSessionThreadEnding(const sp<RpcSession>& session) {
+    (void)session;
+    mShutdownCv.notify_all();
 }
 
 bool RpcServer::hasServer() {
