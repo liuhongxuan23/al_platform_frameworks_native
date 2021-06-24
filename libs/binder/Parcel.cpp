@@ -48,10 +48,10 @@
 #include <utils/String8.h>
 #include <utils/misc.h>
 
-#include <private/binder/binder_module.h>
 #include "RpcState.h"
 #include "Static.h"
 #include "Utils.h"
+#include "binder_module.h"
 
 #define LOG_REFS(...)
 //#define LOG_REFS(...) ALOG(LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -78,7 +78,11 @@ static size_t pad_size(size_t s) {
 namespace android {
 
 // many things compile this into prebuilts on the stack
-static_assert(sizeof(Parcel) == 60 || sizeof(Parcel) == 120);
+#ifdef __LP64__
+static_assert(sizeof(Parcel) == 120);
+#else
+static_assert(sizeof(Parcel) == 60);
+#endif
 
 static std::atomic<size_t> gParcelGlobalAllocCount;
 static std::atomic<size_t> gParcelGlobalAllocSize;
@@ -169,8 +173,8 @@ static void release_object(const sp<ProcessState>& proc,
 status_t Parcel::finishFlattenBinder(const sp<IBinder>& binder)
 {
     internal::Stability::tryMarkCompilationUnit(binder.get());
-    auto category = internal::Stability::getCategory(binder.get());
-    return writeInt32(category.repr());
+    int16_t rep = internal::Stability::getCategory(binder.get()).repr();
+    return writeInt32(rep);
 }
 
 status_t Parcel::finishUnflattenBinder(
@@ -180,7 +184,8 @@ status_t Parcel::finishUnflattenBinder(
     status_t status = readInt32(&stability);
     if (status != OK) return status;
 
-    status = internal::Stability::setRepr(binder.get(), stability, true /*log*/);
+    status = internal::Stability::setRepr(binder.get(), static_cast<int16_t>(stability),
+                                          true /*log*/);
     if (status != OK) return status;
 
     *out = binder;
@@ -191,14 +196,18 @@ static constexpr inline int schedPolicyMask(int policy, int priority) {
     return (priority & FLAT_BINDER_FLAG_PRIORITY_MASK) | ((policy & 3) << FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT);
 }
 
-status_t Parcel::flattenBinder(const sp<IBinder>& binder)
-{
+status_t Parcel::flattenBinder(const sp<IBinder>& binder) {
+    BBinder* local = nullptr;
+    if (binder) local = binder->localBinder();
+    if (local) local->setParceled();
+
     if (isForRpc()) {
         if (binder) {
             status_t status = writeInt32(1); // non-null
             if (status != OK) return status;
             RpcAddress address = RpcAddress::zero();
-            status = mConnection->state()->onBinderLeaving(mConnection, binder, &address);
+            // TODO(b/167966510): need to undo this if the Parcel is not sent
+            status = mSession->state()->onBinderLeaving(mSession, binder, &address);
             if (status != OK) return status;
             status = address.writeToParcel(this);
             if (status != OK) return status;
@@ -218,7 +227,6 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
     }
 
     if (binder != nullptr) {
-        BBinder *local = binder->localBinder();
         if (!local) {
             BpBinder *proxy = binder->remoteBinder();
             if (proxy == nullptr) {
@@ -269,8 +277,7 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
 status_t Parcel::unflattenBinder(sp<IBinder>* out) const
 {
     if (isForRpc()) {
-        LOG_ALWAYS_FATAL_IF(mConnection == nullptr,
-                            "RpcConnection required to read from remote parcel");
+        LOG_ALWAYS_FATAL_IF(mSession == nullptr, "RpcSession required to read from remote parcel");
 
         int32_t isNull;
         status_t status = readInt32(&isNull);
@@ -280,9 +287,10 @@ status_t Parcel::unflattenBinder(sp<IBinder>* out) const
 
         if (isNull & 1) {
             auto addr = RpcAddress::zero();
-            status_t status = addr.readFromParcel(*this);
-            if (status != OK) return status;
-            binder = mConnection->state()->onBinderEntering(mConnection, addr);
+            if (status_t status = addr.readFromParcel(*this); status != OK) return status;
+            if (status_t status = mSession->state()->onBinderEntering(mSession, addr, &binder);
+                status != OK)
+                return status;
         }
 
         return finishUnflattenBinder(binder, out);
@@ -293,7 +301,8 @@ status_t Parcel::unflattenBinder(sp<IBinder>* out) const
     if (flat) {
         switch (flat->hdr.type) {
             case BINDER_TYPE_BINDER: {
-                sp<IBinder> binder = reinterpret_cast<IBinder*>(flat->cookie);
+                sp<IBinder> binder =
+                        sp<IBinder>::fromExisting(reinterpret_cast<IBinder*>(flat->cookie));
                 return finishUnflattenBinder(binder, out);
             }
             case BINDER_TYPE_HANDLE: {
@@ -418,6 +427,11 @@ status_t Parcel::setData(const uint8_t* buffer, size_t len)
 
 status_t Parcel::appendFrom(const Parcel *parcel, size_t offset, size_t len)
 {
+    if (parcel->isForRpc() != isForRpc()) {
+        ALOGE("Cannot append Parcel of one format to another.");
+        return BAD_TYPE;
+    }
+
     status_t err;
     const uint8_t *data = parcel->mData;
     const binder_size_t *objects = parcel->mObjects;
@@ -558,20 +572,20 @@ void Parcel::markForBinder(const sp<IBinder>& binder) {
     LOG_ALWAYS_FATAL_IF(mData != nullptr, "format must be set before data is written");
 
     if (binder && binder->remoteBinder() && binder->remoteBinder()->isRpcBinder()) {
-        markForRpc(binder->remoteBinder()->getPrivateAccessorForId().rpcConnection());
+        markForRpc(binder->remoteBinder()->getPrivateAccessorForId().rpcSession());
     }
 }
 
-void Parcel::markForRpc(const sp<RpcConnection>& connection) {
+void Parcel::markForRpc(const sp<RpcSession>& session) {
     LOG_ALWAYS_FATAL_IF(mData != nullptr && mOwner == nullptr,
                         "format must be set before data is written OR on IPC data");
 
-    LOG_ALWAYS_FATAL_IF(connection == nullptr, "markForRpc requires connection");
-    mConnection = connection;
+    LOG_ALWAYS_FATAL_IF(session == nullptr, "markForRpc requires session");
+    mSession = session;
 }
 
 bool Parcel::isForRpc() const {
-    return mConnection != nullptr;
+    return mSession != nullptr;
 }
 
 void Parcel::updateWorkSourceRequestHeaderPosition() const {
@@ -1455,6 +1469,29 @@ const void* Parcel::readInplace(size_t len) const
         return data;
     }
     return nullptr;
+}
+
+status_t Parcel::readOutVectorSizeWithCheck(size_t elmSize, int32_t* size) const {
+    if (status_t status = readInt32(size); status != OK) return status;
+    if (*size < 0) return OK; // may be null, client to handle
+
+    LOG_ALWAYS_FATAL_IF(elmSize > INT32_MAX, "Cannot have element as big as %zu", elmSize);
+
+    // approximation, can't know max element size (e.g. if it makes heap
+    // allocations)
+    static_assert(sizeof(int) == sizeof(int32_t), "Android is LP64");
+    int32_t allocationSize;
+    if (__builtin_smul_overflow(elmSize, *size, &allocationSize)) return NO_MEMORY;
+
+    // High limit of 1MB since something this big could never be returned. Could
+    // probably scope this down, but might impact very specific usecases.
+    constexpr int32_t kMaxAllocationSize = 1 * 1000 * 1000;
+
+    if (allocationSize >= kMaxAllocationSize) {
+        return NO_MEMORY;
+    }
+
+    return OK;
 }
 
 template<class T>
@@ -2489,7 +2526,7 @@ void Parcel::initState()
     mDataPos = 0;
     ALOGV("initState Setting data size of %p to %zu", this, mDataSize);
     ALOGV("initState Setting data pos of %p to %zu", this, mDataPos);
-    mConnection = nullptr;
+    mSession = nullptr;
     mObjects = nullptr;
     mObjectsSize = 0;
     mObjectsCapacity = 0;

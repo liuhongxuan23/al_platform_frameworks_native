@@ -25,6 +25,7 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::ffi::{c_void, CStr, CString};
 use std::fmt;
+use std::fs::File;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::os::raw::c_char;
@@ -53,6 +54,14 @@ pub trait Interface: Send {
     /// Convert this binder object into a generic [`SpIBinder`] reference.
     fn as_binder(&self) -> SpIBinder {
         panic!("This object was not a Binder object and cannot be converted into an SpIBinder.")
+    }
+
+    /// Dump transaction handler for this Binder object.
+    ///
+    /// This handler is a no-op by default and should be implemented for each
+    /// Binder service struct that wishes to respond to dump transactions.
+    fn dump(&self, _file: &File, _args: &[&CStr]) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -97,6 +106,10 @@ pub trait Remotable: Send + Sync {
     ///
     /// `reply` may be [`None`] if the sender does not expect a reply.
     fn on_transact(&self, code: TransactionCode, data: &Parcel, reply: &mut Parcel) -> Result<()>;
+
+    /// Handle a request to invoke the dump transaction on this
+    /// object.
+    fn on_dump(&self, file: &File, args: &[&CStr]) -> Result<()>;
 
     /// Retrieve the class of this remote object.
     ///
@@ -218,7 +231,7 @@ impl InterfaceClass {
             if class.is_null() {
                 panic!("Expected non-null class pointer from AIBinder_Class_define!");
             }
-            sys::AIBinder_Class_setOnDump(class, None);
+            sys::AIBinder_Class_setOnDump(class, Some(I::on_dump));
             sys::AIBinder_Class_setHandleShellCommand(class, None);
             class
         };
@@ -492,6 +505,16 @@ pub trait InterfaceClassMethods {
     /// returned by `on_create` for this class. This function takes ownership of
     /// the provided pointer and destroys it.
     unsafe extern "C" fn on_destroy(object: *mut c_void);
+
+    /// Called to handle the `dump` transaction.
+    ///
+    /// # Safety
+    ///
+    /// Must be called with a non-null, valid pointer to a local `AIBinder` that
+    /// contains a `T` pointer in its user data. fd should be a non-owned file
+    /// descriptor, and args must be an array of null-terminated string
+    /// poiinters with length num_args.
+    unsafe extern "C" fn on_dump(binder: *mut sys::AIBinder, fd: i32, args: *mut *const c_char, num_args: u32) -> status_t;
 }
 
 /// Interface for transforming a generic SpIBinder into a specific remote
@@ -546,6 +569,28 @@ unsafe impl<T, V: AsNative<T>> AsNative<T> for Option<V> {
     fn as_native_mut(&mut self) -> *mut T {
         self.as_mut().map_or(ptr::null_mut(), |v| v.as_native_mut())
     }
+}
+
+/// The features to enable when creating a native Binder.
+///
+/// This should always be initialised with a default value, e.g.:
+/// ```
+/// # use binder::BinderFeatures;
+/// BinderFeatures {
+///   set_requesting_sid: true,
+///   ..BinderFeatures::default(),
+/// }
+/// ```
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BinderFeatures {
+    /// Indicates that the service intends to receive caller security contexts. This must be true
+    /// for `ThreadState::with_calling_sid` to work.
+    pub set_requesting_sid: bool,
+    // Ensure that clients include a ..BinderFeatures::default() to preserve backwards compatibility
+    // when new fields are added. #[non_exhaustive] doesn't work because it prevents struct
+    // expressions entirely.
+    #[doc(hidden)]
+    pub _non_exhaustive: (),
 }
 
 /// Declare typed interfaces for a binder object.
@@ -730,8 +775,9 @@ macro_rules! declare_binder_interface {
 
         impl $native {
             /// Create a new binder service.
-            pub fn new_binder<T: $interface + Sync + Send + 'static>(inner: T) -> $crate::Strong<dyn $interface> {
-                let binder = $crate::Binder::new_with_stability($native(Box::new(inner)), $stability);
+            pub fn new_binder<T: $interface + Sync + Send + 'static>(inner: T, features: $crate::BinderFeatures) -> $crate::Strong<dyn $interface> {
+                let mut binder = $crate::Binder::new_with_stability($native(Box::new(inner)), $stability);
+                $crate::IBinderInternal::set_requesting_sid(&mut binder, features.set_requesting_sid);
                 $crate::Strong::new(Box::new(binder))
             }
         }
@@ -753,6 +799,10 @@ macro_rules! declare_binder_interface {
                     },
                     result => result
                 }
+            }
+
+            fn on_dump(&self, file: &std::fs::File, args: &[&std::ffi::CStr]) -> $crate::Result<()> {
+                self.0.dump(file, args)
             }
 
             fn get_class() -> $crate::InterfaceClass {

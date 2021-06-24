@@ -24,7 +24,9 @@
 #include <android-base/unique_fd.h>
 #include <binder/Parcel.h>
 #include <binder/ProcessState.h>
+#include <binder/Stability.h>
 #include <binder/TextOutput.h>
+#include <binderdebug/BinderDebug.h>
 #include <serviceutils/PriorityDumper.h>
 #include <utils/Log.h>
 #include <utils/Vector.h>
@@ -60,7 +62,8 @@ static void usage() {
             "usage: dumpsys\n"
             "         To dump all services.\n"
             "or:\n"
-            "       dumpsys [-t TIMEOUT] [--priority LEVEL] [--pid] [--help | -l | --skip SERVICES "
+            "       dumpsys [-t TIMEOUT] [--priority LEVEL] [--pid] [--thread] [--help | -l | "
+            "--skip SERVICES "
             "| SERVICE [ARGS]]\n"
             "         --help: shows this help\n"
             "         -l: only list services, do not dump them\n"
@@ -72,6 +75,8 @@ static void usage() {
             "         --priority LEVEL: filter services based on specified priority\n"
             "               LEVEL must be one of CRITICAL | HIGH | NORMAL\n"
             "         --skip SERVICES: dumps all services but SERVICES (comma-separated list)\n"
+            "         --stability: dump binder stability information instead of usual dump\n"
+            "         --thread: dump thread usage instead of usual dump\n"
             "         SERVICE [ARGS]: dumps only service SERVICE, optionally passing ARGS to it\n");
 }
 
@@ -125,11 +130,13 @@ int Dumpsys::main(int argc, char* const argv[]) {
     Type type = Type::DUMP;
     int timeoutArgMs = 10000;
     int priorityFlags = IServiceManager::DUMP_FLAG_PRIORITY_ALL;
-    static struct option longOptions[] = {{"pid", no_argument, 0, 0},
+    static struct option longOptions[] = {{"help", no_argument, 0, 0},
+                                          {"pid", no_argument, 0, 0},
                                           {"priority", required_argument, 0, 0},
                                           {"proto", no_argument, 0, 0},
                                           {"skip", no_argument, 0, 0},
-                                          {"help", no_argument, 0, 0},
+                                          {"stability", no_argument, 0, 0},
+                                          {"thread", no_argument, 0, 0},
                                           {0, 0, 0, 0}};
 
     // Must reset optind, otherwise subsequent calls will fail (wouldn't happen on main.cpp, but
@@ -163,6 +170,10 @@ int Dumpsys::main(int argc, char* const argv[]) {
                 }
             } else if (!strcmp(longOptions[optionIndex].name, "pid")) {
                 type = Type::PID;
+            } else if (!strcmp(longOptions[optionIndex].name, "stability")) {
+                type = Type::STABILITY;
+            } else if (!strcmp(longOptions[optionIndex].name, "thread")) {
+                type = Type::THREAD;
             }
             break;
 
@@ -329,6 +340,28 @@ static status_t dumpPidToFd(const sp<IBinder>& service, const unique_fd& fd) {
      return OK;
 }
 
+static status_t dumpStabilityToFd(const sp<IBinder>& service, const unique_fd& fd) {
+     WriteStringToFd(internal::Stability::debugToString(service) + "\n", fd);
+     return OK;
+}
+
+static status_t dumpThreadsToFd(const sp<IBinder>& service, const unique_fd& fd) {
+    pid_t pid;
+    status_t status = service->getDebugPid(&pid);
+    if (status != OK) {
+        return status;
+    }
+    BinderPidInfo pidInfo;
+    status = getBinderPidInfo(BinderDebugContext::BINDER, pid, &pidInfo);
+    if (status != OK) {
+        return status;
+    }
+    WriteStringToFd("Threads in use: " + std::to_string(pidInfo.threadUsage) + "/" +
+                        std::to_string(pidInfo.threadCount) + "\n",
+                    fd.get());
+    return OK;
+}
+
 status_t Dumpsys::startDumpThread(Type type, const String16& serviceName,
                                   const Vector<String16>& args) {
     sp<IBinder> service = sm_->checkService(serviceName);
@@ -358,6 +391,12 @@ status_t Dumpsys::startDumpThread(Type type, const String16& serviceName,
             break;
         case Type::PID:
             err = dumpPidToFd(service, remote_end);
+            break;
+        case Type::STABILITY:
+            err = dumpStabilityToFd(service, remote_end);
+            break;
+        case Type::THREAD:
+            err = dumpThreadsToFd(service, remote_end);
             break;
         default:
             std::cerr << "Unknown dump type" << static_cast<int>(type) << std::endl;

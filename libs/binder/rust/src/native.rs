@@ -21,10 +21,13 @@ use crate::proxy::SpIBinder;
 use crate::sys;
 
 use std::convert::TryFrom;
-use std::ffi::{c_void, CString};
+use std::ffi::{c_void, CStr, CString};
+use std::fs::File;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
-use std::ptr;
+use std::os::raw::c_char;
+use std::os::unix::io::FromRawFd;
+use std::slice;
 
 /// Rust wrapper around Binder remotable objects.
 ///
@@ -273,7 +276,7 @@ impl<T: Remotable> InterfaceClassMethods for Binder<T> {
     /// Must be called with a valid pointer to a `T` object. After this call,
     /// the pointer will be invalid and should not be dereferenced.
     unsafe extern "C" fn on_destroy(object: *mut c_void) {
-        ptr::drop_in_place(object as *mut T)
+        Box::from_raw(object as *mut T);
     }
 
     /// Called whenever a new, local `AIBinder` object is needed of a specific
@@ -289,6 +292,37 @@ impl<T: Remotable> InterfaceClassMethods for Binder<T> {
         // We just return the argument, as it is already a pointer to the rust
         // object created by Box.
         args
+    }
+
+    /// Called to handle the `dump` transaction.
+    ///
+    /// # Safety
+    ///
+    /// Must be called with a non-null, valid pointer to a local `AIBinder` that
+    /// contains a `T` pointer in its user data. fd should be a non-owned file
+    /// descriptor, and args must be an array of null-terminated string
+    /// poiinters with length num_args.
+    unsafe extern "C" fn on_dump(binder: *mut sys::AIBinder, fd: i32, args: *mut *const c_char, num_args: u32) -> status_t {
+        if fd < 0 {
+            return StatusCode::UNEXPECTED_NULL as status_t;
+        }
+        // We don't own this file, so we need to be careful not to drop it.
+        let file = ManuallyDrop::new(File::from_raw_fd(fd));
+
+        if args.is_null() {
+            return StatusCode::UNEXPECTED_NULL as status_t;
+        }
+        let args = slice::from_raw_parts(args, num_args as usize);
+        let args: Vec<_> = args.iter().map(|s| CStr::from_ptr(*s)).collect();
+
+        let object = sys::AIBinder_getUserData(binder);
+        let binder: &T = &*(object as *const T);
+        let res = binder.on_dump(&file, &args);
+
+        match res {
+            Ok(()) => 0,
+            Err(e) => e as status_t,
+        }
     }
 }
 
@@ -407,6 +441,10 @@ impl Remotable for () {
         _data: &Parcel,
         _reply: &mut Parcel,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    fn on_dump(&self, _file: &File, _args: &[&CStr]) -> Result<()> {
         Ok(())
     }
 

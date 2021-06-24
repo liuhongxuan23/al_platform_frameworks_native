@@ -102,7 +102,7 @@ public:
         return Status::ok();
     }
     Status sendAndCallBinder(const sp<IBinder>& binder) override {
-        Stability::debugLogStability("sendAndCallBinder got binder", binder);
+        ALOGI("Debug log stability: %s", Stability::debugToString(binder).c_str());
         return Status::fromExceptionCode(BadStableBinder::doUserTransaction(binder));
     }
     Status returnNoStabilityBinder(sp<IBinder>* _aidl_return) override {
@@ -192,6 +192,8 @@ TEST(BinderStability, VintfStabilityServerMustBeDeclaredInManifest) {
         EXPECT_EQ(Status::EX_ILLEGAL_ARGUMENT,
             android::defaultServiceManager()->addService(String16("."), vintfServer)) << instance8;
         EXPECT_FALSE(android::defaultServiceManager()->isDeclared(instance)) << instance8;
+        EXPECT_EQ(std::nullopt, android::defaultServiceManager()->updatableViaApex(instance))
+                << instance8;
     }
 }
 
