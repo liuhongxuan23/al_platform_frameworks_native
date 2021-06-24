@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <android-base/unique_fd.h>
 #include <utils/Errors.h>
 #include <utils/RefBase.h>
 #include <utils/String16.h>
@@ -49,39 +50,40 @@ class [[clang::lto_visibility_public]] IBinder : public virtual RefBase
 {
 public:
     enum {
-        FIRST_CALL_TRANSACTION  = 0x00000001,
-        LAST_CALL_TRANSACTION   = 0x00ffffff,
+        FIRST_CALL_TRANSACTION = 0x00000001,
+        LAST_CALL_TRANSACTION = 0x00ffffff,
 
-        PING_TRANSACTION        = B_PACK_CHARS('_','P','N','G'),
-        DUMP_TRANSACTION        = B_PACK_CHARS('_','D','M','P'),
-        SHELL_COMMAND_TRANSACTION = B_PACK_CHARS('_','C','M','D'),
-        INTERFACE_TRANSACTION   = B_PACK_CHARS('_', 'N', 'T', 'F'),
-        SYSPROPS_TRANSACTION    = B_PACK_CHARS('_', 'S', 'P', 'R'),
-        EXTENSION_TRANSACTION   = B_PACK_CHARS('_', 'E', 'X', 'T'),
-        DEBUG_PID_TRANSACTION   = B_PACK_CHARS('_', 'P', 'I', 'D'),
+        PING_TRANSACTION = B_PACK_CHARS('_', 'P', 'N', 'G'),
+        DUMP_TRANSACTION = B_PACK_CHARS('_', 'D', 'M', 'P'),
+        SHELL_COMMAND_TRANSACTION = B_PACK_CHARS('_', 'C', 'M', 'D'),
+        INTERFACE_TRANSACTION = B_PACK_CHARS('_', 'N', 'T', 'F'),
+        SYSPROPS_TRANSACTION = B_PACK_CHARS('_', 'S', 'P', 'R'),
+        EXTENSION_TRANSACTION = B_PACK_CHARS('_', 'E', 'X', 'T'),
+        DEBUG_PID_TRANSACTION = B_PACK_CHARS('_', 'P', 'I', 'D'),
+        SET_RPC_CLIENT_TRANSACTION = B_PACK_CHARS('_', 'R', 'P', 'C'),
 
         // See android.os.IBinder.TWEET_TRANSACTION
         // Most importantly, messages can be anything not exceeding 130 UTF-8
         // characters, and callees should exclaim "jolly good message old boy!"
-        TWEET_TRANSACTION       = B_PACK_CHARS('_', 'T', 'W', 'T'),
+        TWEET_TRANSACTION = B_PACK_CHARS('_', 'T', 'W', 'T'),
 
         // See android.os.IBinder.LIKE_TRANSACTION
         // Improve binder self-esteem.
-        LIKE_TRANSACTION        = B_PACK_CHARS('_', 'L', 'I', 'K'),
+        LIKE_TRANSACTION = B_PACK_CHARS('_', 'L', 'I', 'K'),
 
         // Corresponds to TF_ONE_WAY -- an asynchronous call.
-        FLAG_ONEWAY             = 0x00000001,
+        FLAG_ONEWAY = 0x00000001,
 
         // Corresponds to TF_CLEAR_BUF -- clear transaction buffers after call
         // is made
-        FLAG_CLEAR_BUF          = 0x00000020,
+        FLAG_CLEAR_BUF = 0x00000020,
 
         // Private userspace flag for transaction which is being requested from
         // a vendor context.
-        FLAG_PRIVATE_VENDOR     = 0x10000000,
+        FLAG_PRIVATE_VENDOR = 0x10000000,
     };
 
-                          IBinder();
+    IBinder();
 
     /**
      * Check if this IBinder implements the interface named by
@@ -150,6 +152,27 @@ public:
      * Dump PID for a binder, for debugging.
      */
     status_t                getDebugPid(pid_t* outPid);
+
+    /**
+     * Set the RPC client fd to this binder service, for debugging. This is only available on
+     * debuggable builds.
+     *
+     * When this is called on a binder service, the service:
+     * 1. sets up RPC server
+     * 2. spawns 1 new thread that calls RpcServer::join()
+     *    - join() spawns some number of threads that accept() connections; see RpcServer
+     *
+     * setRpcClientDebug() may be called multiple times. Each call will add a new RpcServer
+     * and opens up a TCP port.
+     *
+     * Note: A thread is spawned for each accept()'ed fd, which may call into functions of the
+     * interface freely. See RpcServer::join(). To avoid such race conditions, implement the service
+     * functions with multithreading support.
+     *
+     * On death of @a keepAliveBinder, the RpcServer shuts down.
+     */
+    [[nodiscard]] status_t setRpcClientDebug(android::base::unique_fd socketFd,
+                                             const sp<IBinder>& keepAliveBinder);
 
     // NOLINTNEXTLINE(google-default-arguments)
     virtual status_t        transact(   uint32_t code,

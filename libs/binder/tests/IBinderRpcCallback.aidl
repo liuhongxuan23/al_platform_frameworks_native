@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 The Android Open Source Project
+ * Copyright (C) 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,30 +14,7 @@
  * limitations under the License.
  */
 
-#pragma once
-
-
-#include <binder/Parcel.h>
-#include <utils/RefBase.h>
-
-// ---------------------------------------------------------------------------
-namespace android {
-
-/**
- * internal use only
- * @internal
- */
-class ParcelRef : public Parcel, public RefBase
-{
-public:
-    static sp<ParcelRef> create() {
-        return new ParcelRef();
-    }
-
-private:
-    ParcelRef() = default;
-};
-
-} // namespace android
-
-// ---------------------------------------------------------------------------
+interface IBinderRpcCallback {
+    void sendCallback(@utf8InCpp String str);
+    oneway void sendOnewayCallback(@utf8InCpp String str);
+}

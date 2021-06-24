@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 The Android Open Source Project
+ * Copyright (C) 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,11 +14,7 @@
  * limitations under the License.
  */
 
-#pragma once
-
-#include <binder/Parcel.h>
-#include <fuzzer/FuzzedDataProvider.h>
-
-namespace android {
-void fillRandomParcel(Parcel* p, FuzzedDataProvider&& provider);
-} // namespace android
+interface IBinderRpcBenchmark {
+    @utf8InCpp String repeatString(@utf8InCpp String str);
+    IBinder repeatBinder(IBinder binder);
+}
