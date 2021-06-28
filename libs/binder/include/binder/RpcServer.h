@@ -17,6 +17,7 @@
 
 #include <android-base/unique_fd.h>
 #include <binder/IBinder.h>
+#include <binder/RpcAddress.h>
 #include <binder/RpcSession.h>
 #include <utils/Errors.h>
 #include <utils/RefBase.h>
@@ -44,7 +45,7 @@ class RpcSocketAddress;
  *     }
  *     server->join();
  */
-class RpcServer final : public virtual RefBase {
+class RpcServer final : public virtual RefBase, private RpcSession::EventListener {
 public:
     static sp<RpcServer> make();
 
@@ -97,7 +98,7 @@ public:
      *
      * If this is not specified, this will be a single-threaded server.
      *
-     * TODO(b/185167543): these are currently created per client, but these
+     * TODO(b/167966510): these are currently created per client, but these
      * should be shared.
      */
     void setMaxThreads(size_t threads);
@@ -151,18 +152,15 @@ public:
 
     ~RpcServer();
 
-    // internal use only
-
-    void onSessionLockedAllServerThreadsEnded(const sp<RpcSession>& session);
-    void onSessionServerThreadEnded(const sp<RpcSession>& session);
-
 private:
     friend sp<RpcServer>;
     RpcServer();
 
+    void onSessionLockedAllIncomingThreadsEnded(const sp<RpcSession>& session) override;
+    void onSessionIncomingThreadEnded() override;
+
     static void establishConnection(sp<RpcServer>&& server, base::unique_fd clientFd);
     bool setupSocketServer(const RpcSocketAddress& address);
-    [[nodiscard]] bool acceptOne();
 
     bool mAgreedExperimental = false;
     size_t mMaxThreads = 1;
@@ -174,9 +172,8 @@ private:
     std::map<std::thread::id, std::thread> mConnectingThreads;
     sp<IBinder> mRootObject;
     wp<IBinder> mRootObjectWeak;
-    std::map<int32_t, sp<RpcSession>> mSessions;
-    int32_t mSessionIdCounter = 0;
-    std::shared_ptr<RpcSession::FdTrigger> mShutdownTrigger;
+    std::map<RpcAddress, sp<RpcSession>> mSessions;
+    std::unique_ptr<RpcSession::FdTrigger> mShutdownTrigger;
     std::condition_variable mShutdownCv;
 };
 
