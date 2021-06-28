@@ -62,6 +62,7 @@ cc_test {
     shared_libs: [
         "libbase",
         "libbinder",
+        "liblog",
         "libutils",
     ],
     static_libs: [
@@ -76,14 +77,14 @@ cc_test {
 
 // unit test only, which can run on host and doesn't use /dev/binder
 cc_test {
-    name: "binderParcelTest",
+    name: "binderUnitTest",
     host_supported: true,
     target: {
         darwin: {
             enabled: false,
         },
     },
-    srcs: ["binderParcelTest.cpp"],
+    srcs: ["binderParcelUnitTest.cpp", "binderBinderUnitTest.cpp"],
     shared_libs: [
         "libbinder",
         "libutils",
@@ -104,6 +105,7 @@ cc_test {
     shared_libs: [
         "libbase",
         "libbinder",
+        "liblog",
         "libutils",
     ],
     static_libs: [
@@ -118,6 +120,7 @@ aidl_interface {
     host_supported: true,
     unstable: true,
     srcs: [
+        "IBinderRpcCallback.aidl",
         "IBinderRpcSession.aidl",
         "IBinderRpcTest.aidl",
     ],
@@ -325,4 +328,23 @@ cc_benchmark {
         "liblog",
         "libutils",
     ],
+}
+
+cc_test_host {
+    name: "binderUtilsHostTest",
+    defaults: ["binder_test_defaults"],
+    srcs: ["binderUtilsHostTest.cpp"],
+    shared_libs: [
+        "libbase",
+        "libbinder",
+    ],
+    static_libs: [
+        "libgmock",
+    ],
+    test_suites: ["general-tests"],
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    },
 }
